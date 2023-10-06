@@ -85,7 +85,13 @@ nominal_axes = [all_axes[a] for a in nominal_cols]
 groups_to_aggregate = args.aggregateGroups
 
 gen_axes = {
-    "ptVGen": hist.axis.Variable(common.ptV_binning if not args.finePtBinning else range(60), name = "ptVGen", underflow=False, overflow=False),
+    # "ptVGen": hist.axis.Variable(common.ptV_binning if not args.finePtBinning else range(60), name = "ptVGen", underflow=False, overflow=False),
+    "ptVGen": hist.axis.Variable(
+        #list(range(0,151))+[160., 190.0, 220.0, 250.0, 300.0, 400.0, 500.0, 600.0], 
+        #list(range(0,101)), # this is the same binning as hists from theory corrections
+        [0.0,2.5,5.0,8.0,11.4,14.9,18.5,22.0,25.5,29.0,32.6,36.4,40.4,44.9,50.2,56.4,63.9,73.4,85.4,105.0,132.0,173.0,253.0,600.0], # to match ATLAS binning
+        name = "ptVgen", underflow=False,
+    ),
     "absYVGen": hist.axis.Regular(10, 0, 2.5, name = "absYVGen", underflow=False, overflow=False),  
 }
 
@@ -98,7 +104,8 @@ elif args.addHelicityHistos:
     #list(range(0,50,5)).append(np.inf) ,
     axis_ptVgen = hist.axis.Variable(
         # ATLAS bins from arxiv:1606.00689
-        [0., 2.5, 5.0, 8.0, 11.4, 14.9, 18.5, 22.0, 25.5, 29.0, 32.6, 36.4, 40.4, 44.9, 50.2, 56.4, 63.9, 73.4, 85.4, 105.0, 132.0, 173.0, 253.0, 600.0],
+        [0., 2.5, 5.0, 8.0, 11.4, 14.9, 18.5, 22.0, 25.5, 29.0, 
+        32.6, 36.4, 40.4, 44.9, 50.2, 56.4, 63.9, 73.4, 85.4, 105.0, 132.0, 173.0, 253.0, 600.0],
         #[0., 5., 10., 15., 20., 25., 30., 35., 40., 45., 50.],
         #[0., 2.5, 5., 7.5, 10., 12.5, 15., 17.5, 20., 22.5, 25., 30., 35., 40., 45., 50.],
         name = "ptVgenSig", underflow=False, overflow=True
@@ -239,18 +246,23 @@ def build_graph(df, dataset):
     if args.addHelicityHistos and isZ:
 
         df = theory_tools.define_prefsr_vars(df)
+
+        # define cuts based on the axes
+        if theoryAgnostic_axes[0].name == "absYVgenSig" and theoryAgnostic_axes[1].name == "ptVgenSig":
+            absYVgenMax = theoryAgnostic_axes[0].edges[-1]
+            ptVgenMax = theoryAgnostic_axes[1].edges[-1]
+        elif theoryAgnostic_axes[1].name == "absYVgenSig" and theoryAgnostic_axes[0].name == "ptVgenSig":
+            absYVgenMax = theoryAgnostic_axes[1].edges[-1]
+            ptVgenMax = theoryAgnostic_axes[0].edges[-1]
+        else:
+            raise Exception("theoryAgnostic_axes should have absYVgenSig, ptVgenSig as axes to use theoryAgnostic_tools.select_fiducial_space()") 
+        
         if hasattr(dataset, "out_of_acceptance"):
-
-            pdb.set_trace()
-
             logger.debug("Reject events in fiducial phase space")
-            df = theoryAgnostic_tools.select_fiducial_space(df, theoryAgnostic_axes[0].edges[-1], theoryAgnostic_axes[1].edges[-1], accept=False)
+            df = theoryAgnostic_tools.select_fiducial_space(df, absYVgenMax=absYVgenMax, ptVgenMax=ptVgenMax, accept=False)
         else:
             logger.debug("Select events in fiducial phase space for theory agnostic analysis")
-            
-            pdb.set_trace()
-
-            df = theoryAgnostic_tools.select_fiducial_space(df, theoryAgnostic_axes[0].edges[-1], theoryAgnostic_axes[1].edges[-1], accept=True)
+            df = theoryAgnostic_tools.select_fiducial_space(df, absYVgenMax=absYVgenMax, ptVgenMax=ptVgenMax, accept=True)
             theoryAgnostic_tools.add_xnorm_histograms(results, df, args, dataset.name, corr_helpers, qcdScaleByHelicity_helper, theoryAgnostic_axes, theoryAgnostic_cols, for_wmass=False)
             # helicity axis is special, defined through a tensor later, theoryAgnostic_ only includes W rapidity and pt for now
             axes = [*nominal_axes, *theoryAgnostic_axes]

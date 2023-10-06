@@ -41,6 +41,12 @@ def makehelicityWeightHelper(is_w_like = False, filename=None):
         raise RuntimeError(f"Unknown file extension for {filename}")
 
     corrh = out["Z"] if is_w_like else out["W"]
+    if 'muRfact' in corrh.axes.name:
+        corrh = corrh[{'muRfact' : 1.j,}]
+    if 'muFfact' in corrh.axes.name:
+        corrh = corrh[{'muFfact' : 1.j,}]
+    if set(corrh.axes.name) != set(["y", "ptVgen", "chargeVgen", "helicity", "massVgen"]):
+        raise Exception("Unexpected axes in the angular coefficients.")
     corrh = corrh.project('massVgen','y','ptVgen','chargeVgen', 'helicity')
 
     if np.count_nonzero(corrh[{"helicity" : -1.j}] == 0):

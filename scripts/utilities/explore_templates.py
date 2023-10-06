@@ -25,9 +25,14 @@ def main():
 	parser.add_argument('-o', '--output', type=str, required=True, help='Output directory path')
 	parser.add_argument('-lb', '--lower_bound', type=float, default=None, required=False, help="Integrating lower bound window of pT")
 	parser.add_argument('-ub', '--upper_bound', type=float, default=None, required=False, help="Integrating upper bound window of pT")
+	parser.add_argument('-it', '--integrateTheta', type=float, default=False, required=False, help='Integrate Theta')
+	parser.add_argument('-ip', '--integratePhi', type=float, default=False, required=False, help='Integrate Phi')
 	options = parser.parse_args()
 
-	LUMI = 'xx'
+	if options.integrateTheta and options.integratePhi:
+		raise ValueError("Cannot integrate both theta and phi!")
+
+	LUMI = '16.8'
 	INPUT_FILE = options.file
 	OUTPUT_LABEL = options.output + '/{}.pdf'
 
@@ -42,33 +47,46 @@ def main():
 	# grab the template
 	h = results['ZmumuPostVFP']['output']['nominal'].get()
 
-	print("Found the following axes:")
-	for ax in h.axes:
-		print("\t", ax.name)
+	# sanity checks that the tensor is as we expect it
+	assert len(h.axes) == 7
+	assert h.axes[2].name == 'cosThetaStarll'
+	assert h.axes[3].name == 'phiStarll'
+	assert h.axes[5].name == 'ptVgenSig'
+	assert h.axes[-1].name == 'helicity'
 		
 	# plot the P_i templates
 	for hel in range(len(h.axes[-1])):
 
-		# integrate template across other axes --> yields (cosTheta, phi, pTVgen, helicity)
+		# integrate template across other axes --> yields (cosTheta, phi, pTVgen) for chosen helicity
 		h_pi = h[::sum,::sum,:,:,::sum,:, hel]
 
-		# and over specific pTVgen window
-		if options.lower_bound is None: options.lower_bound = h_pi.axes[-2].edges[0]
-		if options.upper_bound is None: options.upper_bound = h_pi.axes[-2].edges[-1]
+		# integrate over specific ptVgenSig window
+		if options.lower_bound is None: options.lower_bound = h_pi.axes[-1].edges[0]
+		if options.upper_bound is None: options.upper_bound = h_pi.axes[-1].edges[-1]
 		h_pi = h_pi[:,:,options.lower_bound*1.0j:options.upper_bound*1.0j:sum]
+
+		# if requested, integrate over a particular kinematic angle
+		if options.integrateTheta: h_pi = h_pi[::sum, :]
+		elif options.integratePhi: h_pi = h_pi[:, ::sum]
 
 		# now plot
 		fig = plt.figure()
 		ax = fig.subplots()
-		_ = hep.hist2dplot(h_pi, ax=ax)
+		if options.integrateTheta or options.integratePhi: _ = hep.histplot(h_pi, ax=ax)
+		else: _ = hep.hist2dplot(h_pi, ax=ax)
 		hep.cms.label(llabel='Preliminary',data=False, lumi=LUMI, ax=ax)
 		label = "P_{}".format(hel-1) if hel != 0 else "UL"
 		fig.suptitle("Templated ${}$".format(label) + \
 			r"($\cos \theta_{CS}, \phi_{CS}$), " + \
 			"$p_T^Z = {}-{}$ GeV".format(options.lower_bound, options.upper_bound),
 			fontsize=24)
-		ax.set_xlabel(r"$\cos\theta_{CS}$")
-		ax.set_ylabel(r"$\phi_{CS}$")
+		if options.integrateTheta: ax.set_xlabel(r"$\phi_{CS}$")
+		elif options.integratePhi: ax.set_xlabel(r"$\cos\theta_{CS}$")
+		else:
+			ax.set_xlabel(r"$\cos\theta_{CS}$")
+			ax.set_ylabel(r"$\phi_{CS}$")
+		if options.integrateTheta: label += "_phi"
+		elif options.integratePhi: label += "_cosTheta"
 		fig.savefig(OUTPUT_LABEL.format(label))
 		fig.savefig(OUTPUT_LABEL.format(label).replace("pdf", "png"))
 		print("Saving to", OUTPUT_LABEL.format(label))
