@@ -19,6 +19,7 @@ import numpy as np
 import uproot
 import pdb
 import hist
+import uproot
 
 def load_helicity_moments_for_sample_from_file(sampleName = "ZmumuPostVFP", filePath = None):
     if not os.path.exists(filePath):
@@ -101,11 +102,9 @@ def plot_Ai_from_hist_for_observable(Ai, h, obs, outname, ratio=False, dyturbo_f
         hists.append(h_dyturbo_Ai)
         labels.append("dyturbo") if corr == 1 else labels.append("dyturbo * -1")
         colors.append('red')
+        h_dyturbo_Ai = get_dyturbo_Ai(Ai, dyturbo_fname)
+        ax = plot_hist(h_dyturbo_Ai, label="dyturbo", ax=ax)
 
-    if atlas_dname and os.path.isdir(atlas_dname) and Ai != -1:
-        if obs != "$p_{T, V}$":
-            raise Exception("ATLAS only implemented for pT")
-        h_atlas_Ai = get_atlas_Ai(Ai, atlas_dname)
         h_atlas_Ai_noFlow = hist.Hist(*hists[0].axes, storage=hist.storage.Double())
         h_atlas_Ai_noFlow.values(flow=False)[...] = h_atlas_Ai.values(flow=False)
         hists.append(h_atlas_Ai_noFlow)
@@ -140,6 +139,7 @@ def main():
     parser.add_argument("-d", "--dyturbo", help = "Dyturbo file name", default=None, required=False)
     parser.add_argument("-a", "--atlas", help = "ATLAS directory name", default=None, required=False)
     parser.add_argument("-r", "--ratio", help = "Make ratio plots", default=0)
+
     args = parser.parse_args()
 
     filePath = f"{args.file}"
