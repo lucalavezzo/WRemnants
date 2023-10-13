@@ -76,9 +76,13 @@ def main():
 		else: _ = hep.hist2dplot(h_pi, ax=ax)
 		hep.cms.label(llabel='Preliminary',data=False, lumi=LUMI, ax=ax)
 		label = "P_{}".format(hel-1) if hel != 0 else "UL"
+		var_labels = ''
+		if not options.integrateTheta: var_labels += r'\cos \theta_{CS}'
+		if not options.integrateTheta and not options.integratePhi: var_labels += ', '
+		if not options.integratePhi: var_labels += r'\phi_{CS}$'
 		fig.suptitle("Templated ${}$".format(label) + \
-			r"($\cos \theta_{CS}, \phi_{CS}$), " + \
-			"$p_T^Z = {}-{}$ GeV".format(options.lower_bound, options.upper_bound),
+			r"( ${}$ ), " + \
+			"$p_T^Z = {}-{}$ GeV".format(var_labels, options.lower_bound, options.upper_bound),
 			fontsize=24)
 		if options.integrateTheta: ax.set_xlabel(r"$\phi_{CS}$")
 		elif options.integratePhi: ax.set_xlabel(r"$\cos\theta_{CS}$")

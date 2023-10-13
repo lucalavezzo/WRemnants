@@ -100,15 +100,19 @@ def plot_Ai_from_hist_for_observable(Ai, h, obs, outname, ratio=False, dyturbo_f
             raise Exception("Dyturbo ratio not implemented due to different binning.")
         h_dyturbo_Ai = get_dyturbo_Ai(Ai, dyturbo_fname)
         hists.append(h_dyturbo_Ai)
-        labels.append("dyturbo") if corr == 1 else labels.append("dyturbo * -1")
+        labels.append("dyturbo") 
         colors.append('red')
         h_dyturbo_Ai = get_dyturbo_Ai(Ai, dyturbo_fname)
         ax = plot_hist(h_dyturbo_Ai, label="dyturbo", ax=ax)
 
+    if atlas_dname and os.path.exists(atlas_dname) and Ai != -1:
+        if obs != "$p_{T, V}$":
+            raise Exception("ATLAS only implemented for pT")
+        h_atlas_Ai = get_atlas_Ai(Ai, atlas_dname)
         h_atlas_Ai_noFlow = hist.Hist(*hists[0].axes, storage=hist.storage.Double())
         h_atlas_Ai_noFlow.values(flow=False)[...] = h_atlas_Ai.values(flow=False)
         hists.append(h_atlas_Ai_noFlow)
-        labels.append("ATLAS") if corr == 1 else labels.append("ATLAS * -1")
+        labels.append("ATLAS") 
         colors.append('green')
 
     if ratio:
@@ -156,7 +160,7 @@ def main():
         os.makedirs(args.outdir)
 
     for i in range(0,8):
-        plot_Ai_from_hist_for_observable(i, minnloZcoeff_ptVgen, "$p_{T, V}$", f"{args.outdir}/A_{i}_vs_pT_minnlo.png", ratio=options.ratio, dyturbo_fname=args.dyturbo, atlas_dname=args.atlas)
+        plot_Ai_from_hist_for_observable(i, minnloZcoeff_ptVgen, "$p_{T, V}$", f"{args.outdir}/A_{i}_vs_pT_minnlo.png", ratio=args.ratio, dyturbo_fname=args.dyturbo, atlas_dname=args.atlas)
         plot_Ai_from_hist_for_observable(i, minnloZcoeff_massVgen, "$m_V$", f"{args.outdir}/A_{i}_vs_mV_minnlo.png")
 
 if __name__ == "__main__":

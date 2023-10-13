@@ -3,10 +3,12 @@ import wremnants
 from wremnants import syst_tools, theory_tools, logging, helicity_utils
 from copy import deepcopy
 import hist
+import pdb
 
 logger = logging.child_logger(__name__)
 
 def select_fiducial_space(df, ptVgenMax, absYVgenMax, accept=True):
+
     # might need to account for some Ai which we neglect, we may have an out-of-acceptance per helicity state
     selection = f"ptVgen < {ptVgenMax} && absYVgen < {absYVgenMax}"
     df = df.Define("fiducial", selection)
