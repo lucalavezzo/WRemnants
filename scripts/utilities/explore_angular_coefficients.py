@@ -5,10 +5,7 @@ import sys
 from utilities import boostHistHelpers as hh, logging
 from utilities import input_tools
 from wremnants import theory_tools
-<<<<<<< HEAD
 from wremnants import plot_tools
-=======
->>>>>>> 9fc9e4f71b26945b5964a4f606992867529a5795
 import h5py
 import narf
 from narf import ioutils
@@ -18,13 +15,10 @@ import matplotlib.pyplot as plt
 import mplhep as hep
 import pdb
 import argparse
-<<<<<<< HEAD
 import numpy as np
 import uproot
 import pdb
 import hist
-=======
->>>>>>> 9fc9e4f71b26945b5964a4f606992867529a5795
 import uproot
 
 def load_helicity_moments_for_sample_from_file(sampleName = "ZmumuPostVFP", filePath = None):
@@ -44,29 +38,17 @@ def make_Ais_for_observable(obs, h, rebin = None):
 
     return h_coeff
 
-<<<<<<< HEAD
 def plot_hist(h, xlabel = None, ylabel = None, label=None, xrange = None, yrange = None, ax=None):
-=======
-def plot_hist(h, xlabel = None, ylabel = None, label=None, xrange = None, yrange = None, corr = 1, ax=None):
->>>>>>> 9fc9e4f71b26945b5964a4f606992867529a5795
 
     if ax is None:
         fig, ax = plt.subplots(nrows = 1, ncols = 1, figsize = (8, 8), sharex = True)
 
     xValues = h.axes.centers[0]
-<<<<<<< HEAD
     yValues = h.values()
     yVariances = h.variances()
         
     ax.plot(xValues, yValues, marker = '.', linestyle = 'dotted', label=label)
     #ax.errorbar(xValues, yValues, yerr=np.sqrt(yVariances))
-=======
-    yValues = h.values() * corr
-#    yVariances = h.variances()
-
-    ax.plot(xValues, yValues, marker = '.', linestyle = 'dotted', label=label)
-#    plt.errorbar(xValues, yValues, yerr=yVariances, marker = ".", linestyle = "solid")
->>>>>>> 9fc9e4f71b26945b5964a4f606992867529a5795
 
     if xlabel:
         ax.set_xlabel(xlabel, fontsize = 22)
@@ -102,7 +84,6 @@ def get_atlas_Ai(Ai, atlas_dname):
     h = file['Table '+str(Ai + 2)]['Hist1D_y1'].to_hist()
     return h
 
-<<<<<<< HEAD
 def plot_Ai_from_hist_for_observable(Ai, h, obs, outname, ratio=False, dyturbo_fname=None, atlas_dname=None):
     hists = [h[{"helicity" : complex(Ai)}]]
     labels = ['minlo']
@@ -111,18 +92,10 @@ def plot_Ai_from_hist_for_observable(Ai, h, obs, outname, ratio=False, dyturbo_f
     corr = 1
     if Ai == 1 or Ai == 3: corr = -1
     hists[0] *= corr
-=======
-def plot_Ai_from_hist_for_observable(Ai, h, obs, outname, dyturbo_fname=None, atlas_dname=None):
-    hToPlot = h[{"helicity" : complex(Ai)}]
-    corr = 1
-    # if Ai == 4 or Ai == 1 or Ai == 3: corr = -1
-    fig, ax = plot_hist(hToPlot, xlabel = obs, ylabel = f"$A_{Ai}$", label="minlo", xrange = None, yrange = None, corr = corr)
->>>>>>> 9fc9e4f71b26945b5964a4f606992867529a5795
 
     if dyturbo_fname and os.path.exists(dyturbo_fname) and Ai != -1:
         if obs != "$p_{T, V}$":
             raise Exception("Dyturbo only implemented for pT")
-<<<<<<< HEAD
         if ratio:
             raise Exception("Dyturbo ratio not implemented due to different binning.")
         h_dyturbo_Ai = get_dyturbo_Ai(Ai, dyturbo_fname)
@@ -160,18 +133,6 @@ def plot_Ai_from_hist_for_observable(Ai, h, obs, outname, dyturbo_fname=None, at
             else:
                 ax = plot_hist(h, label=h, ax=ax)
 
-=======
-        h_dyturbo_Ai = get_dyturbo_Ai(Ai, dyturbo_fname)
-        ax = plot_hist(h_dyturbo_Ai, label="dyturbo", ax=ax)
-
-    if atlas_dname and os.path.isdir(atlas_dname) and Ai != -1:
-        if obs != "$p_{T, V}$":
-            raise Exception("ATLAS only implemented for pT")
-        h_atlas_Ai = get_atlas_Ai(Ai, atlas_dname)
-        ax = plot_hist(h_atlas_Ai, label="ATLAS", ax=ax)
-
-    ax.legend()
->>>>>>> 9fc9e4f71b26945b5964a4f606992867529a5795
     save_fig(fig, outname)
 
 def main():
@@ -181,11 +142,8 @@ def main():
     parser.add_argument("-o", "--outdir", help = "Output directory")
     parser.add_argument("-d", "--dyturbo", help = "Dyturbo file name", default=None, required=False)
     parser.add_argument("-a", "--atlas", help = "ATLAS directory name", default=None, required=False)
-<<<<<<< HEAD
     parser.add_argument("-r", "--ratio", help = "Make ratio plots", default=0)
 
-=======
->>>>>>> 9fc9e4f71b26945b5964a4f606992867529a5795
     args = parser.parse_args()
 
     filePath = f"{args.file}"
@@ -195,7 +153,6 @@ def main():
     minnloWmHelMom = load_helicity_moments_for_sample_from_file(sampleName = "WminusmunuPostVFP", filePath = filePath)
     minnloWpHelMom = load_helicity_moments_for_sample_from_file(sampleName = "WplusmunuPostVFP", filePath = filePath)
 
-<<<<<<< HEAD
     minnloZcoeff_ptVgen = make_Ais_for_observable("ptVgen", minnloZHelMom, [0.0,2.5,5.0,8.0,11.4,14.9,18.5,22.0,25.5,29.0,32.6,36.4,40.4,44.9,50.2,56.4,63.9,73.4,85.4,105.0,132.0,173.0,253.0,600.0])
     minnloZcoeff_massVgen = make_Ais_for_observable("massVgen", minnloZHelMom)
 
@@ -204,18 +161,6 @@ def main():
 
     for i in range(0,8):
         plot_Ai_from_hist_for_observable(i, minnloZcoeff_ptVgen, "$p_{T, V}$", f"{args.outdir}/A_{i}_vs_pT_minnlo.png", ratio=args.ratio, dyturbo_fname=args.dyturbo, atlas_dname=args.atlas)
-=======
-    # Project the helicity moments to the diffent axes
-    minnloZcoeff_ptVgen = make_Ais_for_observable("ptVgen", minnloZHelMom, [0.0,2.5,5.0,8.0,11.4,14.9,18.5,22.0,25.5,29.0,32.6,36.4,40.4,44.9,50.2,56.4,63.9,73.4,85.4,105.0,132.0,173.0,253.0,600.0])
-    minnloZcoeff_massVgen = make_Ais_for_observable("massVgen", minnloZHelMom)
-
-
-    if not os.path.isdir(args.outdir):
-        os.makedir(args.outdir)
-
-    for i in range(-1,8):
-        plot_Ai_from_hist_for_observable(i, minnloZcoeff_ptVgen, "$p_{T, V}$", f"{args.outdir}/A_{i}_vs_pT_minnlo.png", dyturbo_fname=args.dyturbo, atlas_dname=args.atlas)
->>>>>>> 9fc9e4f71b26945b5964a4f606992867529a5795
         plot_Ai_from_hist_for_observable(i, minnloZcoeff_massVgen, "$m_V$", f"{args.outdir}/A_{i}_vs_mV_minnlo.png")
 
 if __name__ == "__main__":
