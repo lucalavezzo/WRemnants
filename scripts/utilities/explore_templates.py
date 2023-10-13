@@ -33,6 +33,9 @@ def main():
 		raise ValueError("Cannot integrate both theta and phi!")
 
 	LUMI = '16.8'
+	options = parser.parse_args()
+
+	LUMI = 'xx'
 	INPUT_FILE = options.file
 	OUTPUT_LABEL = options.output + '/{}.pdf'
 
@@ -53,6 +56,9 @@ def main():
 	assert h.axes[3].name == 'phiStarll'
 	assert h.axes[5].name == 'ptVgenSig'
 	assert h.axes[-1].name == 'helicity'
+	print("Found the following axes:")
+	for ax in h.axes:
+		print("\t", ax.name)
 		
 	# plot the P_i templates
 	for hel in range(len(h.axes[-1])):
@@ -91,6 +97,26 @@ def main():
 			ax.set_ylabel(r"$\phi_{CS}$")
 		if options.integrateTheta: label += "_phi"
 		elif options.integratePhi: label += "_cosTheta"
+		# integrate template across other axes --> yields (cosTheta, phi, pTVgen, helicity)
+		h_pi = h[::sum,::sum,:,:,::sum,:, hel]
+
+		# and over specific pTVgen window
+		if options.lower_bound is None: options.lower_bound = h_pi.axes[-2].edges[0]
+		if options.upper_bound is None: options.upper_bound = h_pi.axes[-2].edges[-1]
+		h_pi = h_pi[:,:,options.lower_bound*1.0j:options.upper_bound*1.0j:sum]
+
+		# now plot
+		fig = plt.figure()
+		ax = fig.subplots()
+		_ = hep.hist2dplot(h_pi, ax=ax)
+		hep.cms.label(llabel='Preliminary',data=False, lumi=LUMI, ax=ax)
+		label = "P_{}".format(hel-1) if hel != 0 else "UL"
+		fig.suptitle("Templated ${}$".format(label) + \
+			r"($\cos \theta_{CS}, \phi_{CS}$), " + \
+			"$p_T^Z = {}-{}$ GeV".format(options.lower_bound, options.upper_bound),
+			fontsize=24)
+		ax.set_xlabel(r"$\cos\theta_{CS}$")
+		ax.set_ylabel(r"$\phi_{CS}$")
 		fig.savefig(OUTPUT_LABEL.format(label))
 		fig.savefig(OUTPUT_LABEL.format(label).replace("pdf", "png"))
 		print("Saving to", OUTPUT_LABEL.format(label))
