@@ -99,22 +99,22 @@ def build_graph(df, dataset):
     df = theory_tools.define_theory_weights_and_corrs(df, dataset.name, corr_helpers, args)
 
     if isZ:
-        #nominal_axes = [axis_massZgen, axis_rapidity, axis_ptVgen, axis_chargeZgen]
-        nominal_axes = [axis_rapidity, axis_ptVgen, axis_phistarll, axis_costhetastarll]
+        nominal_axes = [axis_massZgen, axis_rapidity, axis_ptVgen, axis_chargeZgen]
+        #nominal_axes = [axis_rapidity, axis_ptVgen, axis_phistarll, axis_costhetastarll]
         lep_axes = [axis_l_eta_gen, axis_l_pt_gen, axis_chargeZgen]
     else:
         nominal_axes = [axis_massWgen, axis_rapidity, axis_ptVgen, axis_chargeWgen]
         lep_axes = [axis_l_eta_gen, axis_l_pt_gen, axis_chargeWgen]
 
-    #nominal_cols = ["massVgen", col_rapidity, "ptVgen", "chargeVgen", "phiStarll", "cosThetaStarll"]
-    nominal_cols = [col_rapidity, "ptVgen", "phiStarll", "cosThetaStarll"]
+    nominal_cols = ["massVgen", col_rapidity, "ptVgen", "chargeVgen"]
+    #nominal_cols = [col_rapidity, "ptVgen", "phiStarll", "cosThetaStarll"]
     lep_cols = ["etaPrefsrLep", "ptPrefsrLep", "chargeVgen"]
 
     df = df.Define('ptPrefsrLep', 'genlanti.pt()')
     df = df.Define('etaPrefsrLep', 'genlanti.eta()')
     df = df.Define("CSangles", "wrem::CalccsSineCosThetaPhi(genlanti, genl)")
     df = df.Define("cosThetaStarll", "CSangles.costheta")
-    df = df.Define("phiStarll", "std::atan2(CSangles.sinphi, blah.cosphi)")
+    df = df.Define("phiStarll", "std::atan2(CSangles.sinphi, CSangles.cosphi)")
 
     if args.singleLeptonHists and (isW or isZ):
         if isW:
