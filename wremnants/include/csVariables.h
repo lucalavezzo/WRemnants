@@ -42,42 +42,15 @@ struct CSVars {
 
 };
 
-CSVars CalccsSineCosThetaPhi(const PtEtaPhiMVector& antilepton, const PtEtaPhiMVector& lepton) {
-    // following https://arxiv.org/pdf/2006.11382.pdf pag. 18 eq. 2.56 and 2.57
-    PxPyPzEVector p1(lepton);
-    PxPyPzEVector p2(antilepton);
-    PxPyPzEVector Q = p1+p2;
 
-    // arbitrarily chosen the positive orientation of the z axis by having hadron a move in the z direction in the lab frame. As a result, the negatively charged lepton moves into the same rest-frame hemisphere as hadron a for costheta > 0
-    const int zsign = std::copysign(1.0, Q.z());
-    const double energy = 6500.;
-    PxPyPzEVector pa(0., 0., zsign*energy, energy);
-    PxPyPzEVector pb(0., 0., -1.*zsign*energy, energy);
-
-    double costheta = 1. / (Q.M() * Q.Mt()) * ((p1.E() + p1.z()) * (p2.E() - p2.z()) - (p1.E() - p1.z()) * (p2.E() + p2.z()));
-    double sintheta = std::sqrt(1 - costheta * costheta);
-    double cosphi = 1. / sintheta * (p1.Pt() * p1.Pt() - p2.Pt() * p2.Pt()) / (Q.Pt() * Q.Mt());
-    double sinphi = 2. / sintheta * (p1.y() * p2.x() - p2.y() * p1.x()) / (Q.Pt() * Q.M());
-
-    #if 1
-        costheta = costheta * zsign;
-        double Phi = std::atan2(sinphi, cosphi) * zsign;
-        cosphi = std::cos(Phi);
-        sinphi = std::sin(Phi);
-    #endif
-
-        CSVars angles = {sintheta, costheta, sinphi, cosphi};
-    return angles;
-}
-
-CSVars CalccsSineCosThetaPhi2(const PtEtaPhiMVector& antilepton, const PtEtaPhiMVector& lepton) {
-    PxPyPzEVector antilepton_v(antilepton);
+CSVars csSineCosThetaPhi(const PtEtaPhiMVector &antilepton, const PtEtaPhiMVector &lepton)
+{
     PxPyPzEVector lepton_v(lepton);
-    PxPyPzEVector dilepton = antilepton_v + lepton_v;
+    PxPyPzEVector dilepton = lepton_v + PxPyPzEVector(antilepton);
     const int zsign = std::copysign(1.0, dilepton.z());
     const double energy = 6500.;
-    PxPyPzEVector proton1(0., 0., zsign*energy, energy);
-    PxPyPzEVector proton2(0., 0., -1.*zsign*energy, energy);
+    PxPyPzEVector proton1(0., 0., zsign * energy, energy);
+    PxPyPzEVector proton2(0., 0., -1. * zsign * energy, energy);
 
     auto dilepCM = dilepton.BoostToCM();
     ROOT::Math::Boost dilepCMBoost(dilepCM);
@@ -86,23 +59,20 @@ CSVars CalccsSineCosThetaPhi2(const PtEtaPhiMVector& antilepton, const PtEtaPhiM
     auto pro2boost = unitBoostedVector(dilepCMBoost, proton2);
 
     auto lepton_boost = unitBoostedVector(dilepCMBoost, lepton_v);
-    auto csFrame = (pro1boost-pro2boost).Unit();
-
-    auto csYaxis = cross(pro1boost, pro2boost).Unit();
+    auto csFrame = (pro1boost - pro2boost).Unit();
+    auto csYaxis = cross(pro1boost, -pro2boost).Unit();
     auto csXaxis = cross(csYaxis, csFrame).Unit();
 
     double costheta = dot(csFrame, lepton_boost);
     auto csCross = cross(csFrame, lepton_boost);
-    double sintheta = csCross.R()/(csFrame.R()*lepton_boost.R());
+    double sintheta = csCross.R() / (csFrame.R() * lepton_boost.R());
 
-    double sinphi = dot(csYaxis, lepton_boost)/sintheta;
-    double cosphi = dot(csXaxis, lepton_boost)/sintheta;
-
+    double sinphi = dot(csYaxis, lepton_boost) / sintheta;
+    double cosphi = dot(csXaxis, lepton_boost) / sintheta;
 
     CSVars angles = {sintheta, costheta, sinphi, cosphi};
     return angles;
 }
 
 }
-
 #endif
