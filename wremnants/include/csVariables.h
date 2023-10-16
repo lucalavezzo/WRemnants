@@ -88,7 +88,7 @@ CSVars CalccsSineCosThetaPhi2(const PtEtaPhiMVector& antilepton, const PtEtaPhiM
     auto lepton_boost = unitBoostedVector(dilepCMBoost, lepton_v);
     auto csFrame = (pro1boost-pro2boost).Unit();
 
-    auto csYaxis = cross(pro1boost, -pro2boost).Unit();
+    auto csYaxis = cross(pro1boost, pro2boost).Unit();
     auto csXaxis = cross(csYaxis, csFrame).Unit();
 
     double costheta = dot(csFrame, lepton_boost);
