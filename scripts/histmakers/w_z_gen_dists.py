@@ -13,7 +13,6 @@ import os
 
 parser.add_argument("--skipAngularCoeffs", action='store_true', help="Skip the conversion of helicity moments to angular coeff fractions")
 parser.add_argument("--addHelicityToPDFs", action='store_true', help="Add helicity tensor for PDFs")
-parser.add_argument("--propagatePDFstoHelicity", action='store_true', help="Propagate PDF uncertainties to helicity moments")
 parser.add_argument("--singleLeptonHists", action='store_true', help="Also store single lepton kinematics")
 parser.add_argument("--photonHists", action='store_true', help="Also store photon kinematics")
 parser.add_argument("--skipEWHists", action='store_true', help="Also store histograms for EW reweighting. Use with --filter horace")
@@ -41,17 +40,15 @@ axis_massZgen = hist.axis.Regular(12, 60., 120., name="massVgen")
 
 axis_absYVgen = hist.axis.Variable(
     [0., 0.25, 0.5, 0.75, 1., 1.25, 1.5, 1.75, 2., 2.25, 2.5, 2.75, 3., 3.25, 3.5, 4., 5.], # this is the same binning as hists from theory corrections
-    # [0., 0.4, 0.8, 1.2, 1.6, 2.0, 2.4], #same axis as theory agnostic norms
     name = "absYVgen", underflow=False
 )
 
-axis_ygen = hist.axis.Regular(10, -5., 5., name="y")
+axis_ygen = hist.axis.Regular(200, -5., 5., name="y")
 axis_rapidity = axis_absYVgen if args.absY else axis_ygen
 col_rapidity =  "absYVgen" if args.absY else "yVgen"
 
 axis_ptVgen = hist.axis.Variable(
     list(range(0,101)), # this is the same binning as hists from theory corrections
-    # [0., 3., 6., 9.62315204,12.36966732,16.01207711,21.35210602,29.50001253,60.], #same axis as theory agnostic norms
     name = "ptVgen", underflow=False,
 )
 
@@ -113,11 +110,8 @@ def build_graph(df, dataset):
     #nominal_cols = [col_rapidity, "ptVgen", "phiStarll", "cosThetaStarll"]
     lep_cols = ["etaPrefsrLep", "ptPrefsrLep", "chargeVgen"]
 
-    df = df.Define('ptPrefsrLep', 'genlanti.pt()')
-    df = df.Define('etaPrefsrLep', 'genlanti.eta()')
-    df = df.Define("CSangles", "wrem::CalccsSineCosThetaPhi(genlanti, genl)")
-    df = df.Define("cosThetaStarll", "CSangles.costheta")
-    df = df.Define("phiStarll", "std::atan2(CSangles.sinphi, CSangles.cosphi)")
+    df = df.Define("cosThetaStarll", "csSineCosThetaPhill.costheta")
+    df = df.Define("phiStarll", "std::atan2(csSineCosThetaPhill.sinphi, csSineCosThetaPhill.cosphi)")
 
     if args.singleLeptonHists and (isW or isZ):
         if isW:
@@ -126,9 +120,6 @@ def build_graph(df, dataset):
         else:
             df = df.Define('ptPrefsrLep', 'genlanti.pt()')
             df = df.Define('etaPrefsrLep', 'genlanti.eta()')
-            df = df.Define("csSineCosThetaPhi", "wrem::CalccsSineCosThetaPhi(genlanti, genl)")
-            df = df.Define("cosThetaStarll", "csSineCosThetaPhill.costheta")
-            df = df.Define("phiStarll", "std::atan2(csSineCosThetaPhill.sinphi, csSineCosThetaPhill.cosphi)")
         results.append(df.HistoBoost("nominal_genlep", lep_axes, [*lep_cols, "nominal_weight"], storage=hist.storage.Double()))
 
     if not args.skipEWHists and (isW or isZ):
@@ -208,15 +199,15 @@ def build_graph(df, dataset):
         if "LHEScaleWeight" in df.GetColumnNames():
             df = theory_tools.define_scale_tensor(df)
             syst_tools.add_qcdScale_hist(results, df, nominal_axes, nominal_cols, "nominal_gen")
-            df = df.Define("helicity_moments_scale_tensor", "wrem::makeHelicityMomentScaleTensor(csSineCosThetaPhi, scaleWeights_tensor, nominal_weight)")
+            df = df.Define("helicity_moments_scale_tensor", "wrem::makeHelicityMomentScaleTensor(csSineCosThetaPhill, scaleWeights_tensor, nominal_weight)")
             helicity_moments_scale = df.HistoBoost("helicity_moments_scale", nominal_axes, [*nominal_cols, "helicity_moments_scale_tensor"], tensor_axes = [wremnants.axis_helicity, *wremnants.scale_tensor_axes], storage=hist.storage.Weight())
             results.append(helicity_moments_scale)
 
         if "LHEPdfWeight" in df.GetColumnNames():
             if args.addHelicityToPDFs:
                 weightsByHelicity_helper = wremnants.makehelicityWeightHelper()
-                df = df.Define("helWeight_tensor", weightsByHelicity_helper, ["massVgen", "yVgen", "ptVgen", "chargeVgen", "csSineCosThetaPhi", "nominal_weight"])
-            syst_tools.add_pdf_hists(results, df, dataset.name, nominal_axes, nominal_cols, args.pdfs, "nominal_gen",addhelicity=args.addHelicityToPDFs, propagateToHelicity=args.propagatePDFstoHelicity)
+                df = df.Define("helWeight_tensor", weightsByHelicity_helper, ["massVgen", "yVgen", "ptVgen", "chargeVgen", "csSineCosThetaPhill", "nominal_weight"])
+            syst_tools.add_pdf_hists(results, df, dataset.name, nominal_axes, nominal_cols, args.pdfs, "nominal_gen", addhelicity=args.addHelicityToPDFs)
 
     if args.theoryCorr and dataset.name in corr_helpers:
         results.extend(theory_tools.make_theory_corr_hists(df, "nominal_gen", nominal_axes, nominal_cols,

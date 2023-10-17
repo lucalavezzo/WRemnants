@@ -25,21 +25,16 @@ def integrate_pT(h, lower_bound=None, upper_bound=None, pt_axis='ptVgen'):
     return h
 
 def flip_phi_axis(h, options):
-    if options.integrateTheta:
-        original_values = h.values()
-        new_values = np.copy(original_values)
-        N = new_values.shape[0]
-        new_values[0:int(N/2)] = original_values[int(N/2):int(N)]
-        new_values[int(N/2):int(N)] = original_values[0:int(N/2)]        
-        h.values()[...] = new_values
-    elif (not options.integratePhi):
-        original_values = h.values()
-        new_values = np.copy(original_values)
-        N = new_values.shape[1]
-        new_values[:, 0:int(N/2)] = original_values[:, int(N/2):int(N)]
-        new_values[:, int(N/2):int(N)] = original_values[:, 0:int(N/2)]        
-        h.values()[...] = new_values
-    return h
+    assert h.axes[1].name == 'phiStarll', 'phiStarll must be second axis if not integrating over phi, found ' + str(h.axes[1].name)
+    if h.axes[1].centers[0] >= 0: return h # don't need to flip if already in [0, 2pi]
+    h_new = hist.Hist(h.axes[0], hist.axis.Regular(len(h.axes[1].centers), 0, 2*np.pi, circular = True, name = "phiStarll"), storage = hist.storage.Double())
+    original_values = h.values()
+    new_values = np.copy(original_values)
+    N = new_values.shape[1]
+    new_values[:, 0:int(N/2)] = original_values[:, int(N/2):int(N)]
+    new_values[:, int(N/2):int(N)] = original_values[:, 0:int(N/2)]        
+    h_new.values()[...] = new_values
+    return h_new
 
 def make_Pi_plot(h_pi, hel, options):
     fig = plt.figure()

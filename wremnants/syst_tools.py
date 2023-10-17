@@ -308,7 +308,7 @@ def add_pdf_hists(results, df, dataset, axes, cols, pdfs, base_name="nominal", a
             as_ax = hist.axis.StrCategory(["as0117", "as0119"], name="alphasVar")
         else:
             alphaSHistName = Datagroups.histName(base_name, syst=f"{pdfName}alphaS002")
-            as_ax = hist.axis.StrCategory(["as0116", "as0120"], name="alphasVar")
+            as_ax = hist.axis.StrCategory(["as0116", "as0120"], name="alphasVarCo")
 
         if addhelicity:
             pdfHeltensor, pdfHeltensor_axes =  make_pdfweight_helper_helicity(npdf, pdf_ax)

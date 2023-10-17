@@ -16,6 +16,7 @@ import h5py
 import hdf5plugin
 import narf
 import pdb
+import wremnants
 
 logger = logging.child_logger(__name__)
 
@@ -30,18 +31,28 @@ axis_helicity_multidim = hist.axis.Integer(-1, 8, name="helicity", overflow=Fals
 def makehelicityWeightHelper(is_w_like = False, filename=None):
     if filename is None:
         #filename = f"{common.data_dir}/angularCoefficients/w_z_coeffs_scetlib_dyturboCorr.hdf5" 
-        filename = "/data/submit/cms/store/user/lavezzo/ZBosonAnalysis//AngularCoefficients/11_10_2023__13_19_03/w_z_coeffs.hdf5"
+        filename = "/data/submit/cms/store/user/lavezzo/ZBosonAnalysis/TheoryAgnostic/AngularCoefficients/16_10_2023__18_11_45/w_z_gen_dists.hdf5"
 
     if filename.endswith('hdf5'):
         with h5py.File(filename, "r") as ff:
             out = narf.ioutils.pickle_load_h5py(ff["results"])
+
+            # debug
+            out = out['ZmumuPostVFP']['output']['helicity_moments_scale'].get()
+            corrh = wremnants.moments_to_angular_coeffs(out, sumW2=False)
+            print(corrh.axes.name)
+
     elif filename.endswith('pkl.lz4'):
         with lz4.frame.open(filename, "rb") as f:
             out = pickle.load(f)
     else:
         raise RuntimeError(f"Unknown file extension for {filename}")
 
-    corrh = out["Z"] if is_w_like else out["W"]
+    
+
+    # debug
+    #corrh = out["Z"] if is_w_like else out["W"]
+
     if 'muRfact' in corrh.axes.name:
         corrh = corrh[{'muRfact' : 1.j,}]
     if 'muFfact' in corrh.axes.name:
