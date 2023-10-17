@@ -107,7 +107,7 @@ class WeightByHelicityHelper : public TensorCorrectionsHelper<T> {
      helweight_tensor_t helWeights;
 
      double sum = coeffs(0) * moments(9); // 1.*cos^2(theta)
-     helWeights(0) = coeffs(0) * moments(9)
+     helWeights(0) = coeffs(0) * moments(9);
      for(unsigned int i = 1; i < NHELICITY;i++) {
        helWeights(i) = coeffs(i) * moments(i);
        sum += coeffs(i) * moments(i);//full sum of all components
