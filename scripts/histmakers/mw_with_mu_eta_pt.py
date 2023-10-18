@@ -1,5 +1,6 @@
 import argparse
-from utilities import output_tools, common, rdf_tools, logging, differential
+from utilities import common, rdf_tools, logging, differential
+from utilities.io_tools import output_tools
 from wremnants.datasets.datagroups import Datagroups
 
 parser,initargs = common.common_parser(True)
@@ -20,7 +21,6 @@ import os
 import numpy as np
 
 data_dir = common.data_dir
-parser.add_argument("--noScaleFactors", action="store_true", help="Don't use scale factors for efficiency (legacy option for tests)")
 parser.add_argument("--lumiUncertainty", type=float, help="Uncertainty for luminosity in excess to 1 (e.g. 1.012 means 1.2\%)", default=1.012)
 parser.add_argument("--noGenMatchMC", action='store_true', help="Don't use gen match filter for prompt muons with MC samples (note: QCD MC never has it anyway)")
 parser.add_argument("--theoryAgnostic", action='store_true', help="Add V qT,Y axes and helicity axes for W samples")
@@ -49,7 +49,9 @@ if args.theoryAgnostic or args.unfolding:
         if not args.poiAsNoi:
             logger.warning("Running theory agnostic with only nominal and mass weight histograms for now.")
             parser = common.set_parser_default(parser, "onlyMainHistograms", True)
-        
+    if args.unfolding:
+        parser = common.set_parser_default(parser, "pt", [32,26.,58.])
+
     args = parser.parse_args()
     
 thisAnalysis = ROOT.wrem.AnalysisType.Wmass
@@ -95,10 +97,16 @@ axes_WeffMC = [axis_eta, axis_pt_eff, axis_ut, axis_charge, axis_passIso, axis_p
 groups_to_aggregate = args.aggregateGroups
 
 if args.unfolding:
-
-    unfolding_axes, unfolding_cols = differential.get_pt_eta_axes(args.genBins[0], template_minpt, template_maxpt, args.genBins[1])
+    # first and last pT bins are merged into under and overflow
+    template_wpt = (template_maxpt-template_minpt)/args.genBins[0]
+    min_pt_unfolding = template_minpt+template_wpt
+    max_pt_unfolding = template_maxpt-template_wpt
+    npt_unfolding = args.genBins[0]-2
+    unfolding_axes, unfolding_cols = differential.get_pt_eta_axes(npt_unfolding, min_pt_unfolding, max_pt_unfolding, args.genBins[1])
     datasets = unfolding_tools.add_out_of_acceptance(datasets, group = "Wmunu")
+    datasets = unfolding_tools.add_out_of_acceptance(datasets, group = "Wtaunu")
     groups_to_aggregate.append("BkgWmunu")
+    groups_to_aggregate.append("BkgWtaunu")
 
 elif args.theoryAgnostic:
 
@@ -225,14 +233,14 @@ def build_graph(df, dataset):
     axes = nominal_axes
     cols = nominal_cols
 
-    if args.unfolding and isWmunu:
+    if args.unfolding and isW:
         df = unfolding_tools.define_gen_level(df, args.genLevel, dataset.name, mode="wmass")
         if hasattr(dataset, "out_of_acceptance"):
             logger.debug("Reject events in fiducial phase space")
-            df = unfolding_tools.select_fiducial_space(df, mode="wmass", pt_min=args.pt[1], pt_max=args.pt[2], accept=False)
+            df = unfolding_tools.select_fiducial_space(df, mode="wmass", accept=False)
         else:
             logger.debug("Select events in fiducial phase space")
-            df = unfolding_tools.select_fiducial_space(df, mode="wmass", pt_min=args.pt[1], pt_max=args.pt[2], accept=True)
+            df = unfolding_tools.select_fiducial_space(df, mode="wmass", accept=True)
 
             unfolding_tools.add_xnorm_histograms(results, df, args, dataset.name, corr_helpers, qcdScaleByHelicity_helper, unfolding_axes, unfolding_cols)
             axes = [*nominal_axes, *unfolding_axes] 
@@ -340,6 +348,9 @@ def build_graph(df, dataset):
         df = df.Define("weight_newMuonPrefiringSF", muon_prefiring_helper, ["Muon_correctedEta", "Muon_correctedPt", "Muon_correctedPhi", "Muon_correctedCharge", "Muon_looseId"])
 
         weight_expr = "weight_pu*weight_newMuonPrefiringSF*L1PreFiringWeight_ECAL_Nom"
+        if not args.noVertexWeight:
+            weight_expr += "*weight_vtx"
+
         # define recoil uT, muon projected on boson pt, the latter is made using preFSR variables
         # TODO: fix it for not W/Z processes
         columnsForSF = ["goodMuons_pt0", "goodMuons_eta0", "goodMuons_SApt0", "goodMuons_SAeta0", "goodMuons_uT0", "goodMuons_charge0", "passIso"]
@@ -350,9 +361,6 @@ def build_graph(df, dataset):
         if not args.noScaleFactors:
             df = df.Define("weight_fullMuonSF_withTrackingReco", muon_efficiency_helper, columnsForSF)
             weight_expr += "*weight_fullMuonSF_withTrackingReco"
-
-        if not args.noVertexWeight:
-            weight_expr += "*weight_vtx"
         
         df = df.Define("exp_weight", weight_expr)
         df = theory_tools.define_theory_weights_and_corrs(df, dataset.name, corr_helpers, args)

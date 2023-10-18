@@ -1,4 +1,5 @@
-from utilities import boostHistHelpers as hh, common, output_tools, logging, differential
+from utilities import boostHistHelpers as hh, common, logging, differential
+from utilities.io_tools import output_tools
 
 parser,initargs = common.common_parser(True)
 
@@ -22,6 +23,10 @@ parser = common.set_parser_default(parser, "aggregateGroups", ["Diboson", "Top",
 
 args = parser.parse_args()
 logger = logging.setup_logger(__file__, args.verbose, args.noColorLogger)
+
+if args.unfolding:
+    parser = common.set_parser_default(parser, "pt", [36,26.,62.])
+    args = parser.parse_args()
 
 thisAnalysis = ROOT.wrem.AnalysisType.Wlike
 datasets = getDatasets(maxFiles=args.maxFiles,
@@ -60,7 +65,11 @@ nominal_axes = [axis_eta, axis_pt, axis_charge]
 nominal_cols = ["trigMuons_eta0", "trigMuons_pt0", "trigMuons_charge0"]
 
 if args.unfolding:
-    unfolding_axes, unfolding_cols = differential.get_pt_eta_charge_axes(args.genBins[0], template_minpt, template_maxpt, args.genBins[1])
+    template_wpt = (template_maxpt-template_minpt)/args.genBins[0]
+    min_pt_unfolding = template_minpt+template_wpt
+    max_pt_unfolding = template_maxpt-template_wpt
+    npt_unfolding = args.genBins[0]-2
+    unfolding_axes, unfolding_cols = differential.get_pt_eta_charge_axes(npt_unfolding, min_pt_unfolding, max_pt_unfolding, args.genBins[1])
     datasets = unfolding_tools.add_out_of_acceptance(datasets, group = "Zmumu")
 
 # axes for mT measurement
@@ -83,6 +92,7 @@ else:
 logger.info(f"SF file: {args.sfFile}")
 
 pileup_helper = wremnants.make_pileup_helper(era = era)
+vertex_helper = wremnants.make_vertex_helper(era = era)
 
 calib_filepaths = common.calib_filepaths
 closure_filepaths = common.closure_filepaths
@@ -158,8 +168,16 @@ def build_graph(df, dataset):
 
     df = muon_selections.apply_triggermatching_muon(df, dataset, "trigMuons_eta0", "trigMuons_phi0")
 
-    if not dataset.is_data:
+    if dataset.is_data:
+        df = df.DefinePerSample("nominal_weight", "1.0")
+    else:
         df = df.Define("weight_pu", pileup_helper, ["Pileup_nTrueInt"])
+        df = df.Define("weight_vtx", vertex_helper, ["GenVtx_z", "Pileup_nTrueInt"])
+        df = df.Define("weight_newMuonPrefiringSF", muon_prefiring_helper, ["Muon_correctedEta", "Muon_correctedPt", "Muon_correctedPhi", "Muon_correctedCharge", "Muon_looseId"])
+
+        weight_expr = "weight_pu*weight_newMuonPrefiringSF*L1PreFiringWeight_ECAL_Nom"
+        if not args.noVertexWeight:
+            weight_expr += "*weight_vtx"            
 
         columnsForSF = ["trigMuons_pt0", "trigMuons_eta0", "trigMuons_SApt0", "trigMuons_SAeta0", "trigMuons_uT0", "trigMuons_charge0",
                         "nonTrigMuons_pt0", "nonTrigMuons_eta0", "nonTrigMuons_SApt0", "nonTrigMuons_SAeta0", "nonTrigMuons_uT0", "nonTrigMuons_charge0"]
@@ -169,13 +187,12 @@ def build_graph(df, dataset):
             columnsForSF.remove("trigMuons_uT0")
             columnsForSF.remove("nonTrigMuons_uT0")
         
-        df = df.Define("weight_fullMuonSF_withTrackingReco", muon_efficiency_helper, columnsForSF)
-        df = df.Define("weight_newMuonPrefiringSF", muon_prefiring_helper, ["Muon_correctedEta", "Muon_correctedPt", "Muon_correctedPhi", "Muon_correctedCharge", "Muon_looseId"])
-
-        df = df.Define("exp_weight", "weight_pu*weight_fullMuonSF_withTrackingReco*weight_newMuonPrefiringSF*L1PreFiringWeight_ECAL_Nom")
+        if not args.noScaleFactors:
+            df = df.Define("weight_fullMuonSF_withTrackingReco", muon_efficiency_helper, columnsForSF)
+            weight_expr += "*weight_fullMuonSF_withTrackingReco"
+           
+        df = df.Define("exp_weight", weight_expr)
         df = theory_tools.define_theory_weights_and_corrs(df, dataset.name, corr_helpers, args)
-    else:
-        df = df.DefinePerSample("nominal_weight", "1.0")
 
     results.append(df.HistoBoost("weight", [hist.axis.Regular(100, -2, 2)], ["nominal_weight"], storage=hist.storage.Double()))
 
