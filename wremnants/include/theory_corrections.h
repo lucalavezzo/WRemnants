@@ -24,6 +24,8 @@ public:
     // helper for bin lookup which implements the compile-time loop over axes
     template<typename... Xs, std::size_t... Idxs>
     const tensor_t &get_tensor_impl(std::index_sequence<Idxs...>, const Xs&... xs) {
+        // ((std::cout << xs << " "), ...); // Expand the parameter pack and print each value if needed
+        // std::cout << std::endl;
       return correctionHist_->at(correctionHist_->template axis<Idxs>().index(xs)...).data();
     }
 
@@ -142,13 +144,19 @@ public:
         static_assert(nhelicity == NHELICITY);
         static_assert(ncorrs == 2);
 
-        const auto angular = csAngularFactors(csvars);
-        const auto coeffs = base_t::get_tensor(mV, yV, ptV, qV);
+        const auto &angular = csAngularFactors(csvars);
+        const auto &coeffs = base_t::get_tensor(mV, yV, ptV, qV);
 
         constexpr std::array<Eigen::Index, 3> reshapedims = {nhelicity, 1, 1};
         constexpr std::array<Eigen::Index, 1> reduceddims = {0};
 
-        const auto coeffs_with_angular = coeffs*angular.reshape(reshapedims).broadcast(sizes);
+        Eigen::TensorFixedSize<double, Eigen::Sizes<nhelicity, 1, 1>> coeffs_with_angular = coeffs*angular.reshape(reshapedims).broadcast(sizes);
+
+        coeffs_with_angular(0) = coeffs(0) * angular(9);
+        for(unsigned int i = 1; i < NHELICITY-1;i++) {
+            coeffs_with_angular(i) = coeffs(i) * angular(i);
+        }
+
         auto uncorr_hel = coeffs_with_angular.chip(0, 1);
         auto corr_hel = coeffs_with_angular.chip(1, 1);
 
