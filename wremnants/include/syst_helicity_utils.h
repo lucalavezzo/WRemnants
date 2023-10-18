@@ -93,7 +93,7 @@ class WeightByHelicityHelper : public TensorCorrectionsHelper<T> {
    using tensor_t = typename T::storage_type::value_type::tensor_t;
    static constexpr auto sizes = narf::tensor_traits<tensor_t>::sizes;
    //static constexpr auto nhelicity = NHELICITY;
-   static constexpr auto NHELICITY_WEIGHTS = 9;
+   static constexpr auto NHELICITY_WEIGHTS = 10;
    // TODO: Can presumably get the double type from the template param
    typedef Eigen::TensorFixedSize<double, Eigen::Sizes<NHELICITY_WEIGHTS>> helweight_tensor_t;
    
