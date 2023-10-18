@@ -24,44 +24,27 @@ narf.clingutils.Declare('#include "syst_helicity_utils.h"')
 
 data_dir = f"{pathlib.Path(__file__).parent}/data/"
 
-#UL, A0...A7
-axis_helicity_multidim = hist.axis.Integer(-1, 8, name="helicity", overflow=False, underflow=False)
+#UL, A0...A4
+axis_helicity_multidim = hist.axis.Integer(-1, 8, name="helicitySig", overflow=False, underflow=False)
 
 #creates the helicity weight tensor
 def makehelicityWeightHelper(is_w_like = False, filename=None):
     if filename is None:
-        #filename = f"{common.data_dir}/angularCoefficients/w_z_coeffs_scetlib_dyturboCorr.hdf5" 
-        filename = "/data/submit/cms/store/user/lavezzo/ZBosonAnalysis/TheoryAgnostic/AngularCoefficients/16_10_2023__18_11_45/w_z_gen_dists.hdf5"
+        filename = f"{common.data_dir}/angularCoefficients/w_z_coeffs_absY_scetlib_dyturboCorr.hdf5" 
+    with h5py.File(filename, "r") as ff:
+        out = narf.ioutils.pickle_load_h5py(ff["results"])
 
-    if filename.endswith('hdf5'):
-        with h5py.File(filename, "r") as ff:
-            out = narf.ioutils.pickle_load_h5py(ff["results"])
-
-            # debug
-            out = out['ZmumuPostVFP']['output']['helicity_moments_scale'].get()
-            corrh = wremnants.moments_to_angular_coeffs(out, sumW2=False)
-            print(corrh.axes.name)
-
-    elif filename.endswith('pkl.lz4'):
-        with lz4.frame.open(filename, "rb") as f:
-            out = pickle.load(f)
-    else:
-        raise RuntimeError(f"Unknown file extension for {filename}")
-
-    
-
-    # debug
-    #corrh = out["Z"] if is_w_like else out["W"]
+    corrh = out["Z"] if is_w_like else out["W"]
 
     if 'muRfact' in corrh.axes.name:
         corrh = corrh[{'muRfact' : 1.j,}]
     if 'muFfact' in corrh.axes.name:
         corrh = corrh[{'muFfact' : 1.j,}]
-    missing = set(["y", "ptVgen", "chargeVgen", "helicity", "massVgen"]).difference(set(corrh.axes.name))
+    missing = set(["absYVgen", "ptVgen", "chargeVgen", "helicity", "massVgen"]).difference(set(corrh.axes.name))
     if missing != set():
         raise ValueError (f"Axes {missing} are not present in the coeff histogram")
     
-    corrh = corrh.project('massVgen','y','ptVgen','chargeVgen', 'helicity')
+    corrh = corrh.project('massVgen','absYVgen','ptVgen','chargeVgen', 'helicity')
 
     if np.count_nonzero(corrh[{"helicity" : -1.j}] == 0):
         logger.warning("Zeros in sigma UL for the angular coefficients will give undefined behaviour!")
