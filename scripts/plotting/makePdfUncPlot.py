@@ -1,4 +1,3 @@
-import wremnants
 from wremnants import plot_tools,theory_tools,histselections as sel
 from utilities.io_tools import input_tools
 import matplotlib.pyplot as plt
