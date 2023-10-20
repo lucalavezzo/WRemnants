@@ -42,7 +42,7 @@ def make_Pi_plot(h_pi, hel, options):
     if options.integrateTheta or options.integratePhi: _ = hep.histplot(h_pi, ax=ax)
     else: _ = hep.hist2dplot(h_pi, ax=ax)
     hep.cms.label(llabel='Preliminary',data=False, lumi=LUMI, ax=ax)
-    helicityLabel = "P_{}".format(hel-1) if hel != 0 else "UL"
+    helicityLabel = "P_{}".format(hel) if hel != -1 else "UL"
     dataType = 'Templated' if not options.gen else 'Gen'
     var_labels = ''
     if not options.integrateTheta: var_labels += r'\cos \theta_{CS}'
@@ -100,10 +100,12 @@ def main():
         pt_axis = 'ptVgenSig'
 
     # plot the P_i's
-    for hel in range(len(h.axes['helicity'].centers)):
+    for hel in range(-1, len(h.axes['helicitySig'].centers)-1):
+
+        # grab the ith harmonic
+        h_pi = h[{'helicitySig':hel*1.0j}]
 
         # integrate harmonic across other axes
-        h_pi = h[{'helicity':hel}]
         h_pi = h_pi.project("cosThetaStarll", "phiStarll", pt_axis)
 
         # integrate over specific pt window

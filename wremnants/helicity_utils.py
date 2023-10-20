@@ -36,6 +36,8 @@ def makehelicityWeightHelper(is_w_like = False, filename=None):
 
     corrh = out["Z"] if is_w_like else out["W"]
 
+    print(corrh.axes.name)
+
     if 'muRfact' in corrh.axes.name:
         corrh = corrh[{'muRfact' : 1.j,}]
     if 'muFfact' in corrh.axes.name:
