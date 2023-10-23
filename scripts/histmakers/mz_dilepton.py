@@ -6,7 +6,7 @@ parser,initargs = common.common_parser(True)
 import ROOT
 import narf
 import wremnants
-from wremnants import theory_tools,syst_tools,theory_corrections, muon_validation, muon_calibration, muon_selections, unfolding_tools
+from wremnants import theory_tools,syst_tools,theory_corrections, muon_validation, muon_calibration, muon_selections, unfolding_tools, helicity_utils, theoryAgnostic_tools
 from wremnants.histmaker_tools import scale_to_data, aggregate_groups
 from wremnants.datasets.dataset_tools import getDatasets
 import hist
@@ -14,12 +14,16 @@ import lz4.frame
 import math
 import time
 import os
+import pdb
 
 
 parser.add_argument("--csVarsHist", action='store_true', help="Add CS variables to dilepton hist")
 parser.add_argument("--axes", type=str, nargs="*", default=["mll", "ptll"], help="")
 parser.add_argument("--finePtBinning", action='store_true', help="Use fine binning for ptll")
 parser.add_argument("--noAuxiliaryHistograms", action="store_true", help="Remove auxiliary histograms to save memory (removed by default with --unfolding or --theoryAgnostic)")
+#parser.add_argument("--genVars", type=str, nargs="+", default=["ptVGen"], choices=["ptVGen", "absYVGen"], help="Generator level variable")
+parser.add_argument("--addHelicityHistos", action='store_true', help="Add V qT,Y axes and helicity axes for W samples")
+parser.add_argument("--onlyTheorySyst", action="store_true", help="Keep only theory systematic variations, mainly for tests")
 
 parser = common.set_parser_default(parser, "genVars", ["ptVGen", "absYVGen"])
 parser = common.set_parser_default(parser, "pt", [34,26.,60.])
@@ -43,13 +47,13 @@ mass_min = 60
 mass_max = 120
 
 ewMassBins = theory_tools.make_ew_binning(mass = 91.1535, width = 2.4932, initialStep=0.010)
-dilepton_ptV_binning = [0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 20, 23, 27, 32, 40, 54, 100] if not args.finePtBinning else range(60)
+
 # available axes for dilepton validation plots
 all_axes = {
     "mll": hist.axis.Regular(60, 60., 120., name = "mll", overflow=not args.excludeFlow, underflow=not args.excludeFlow),
     "yll": hist.axis.Regular(20, -2.5, 2.5, name = "yll", overflow=not args.excludeFlow, underflow=not args.excludeFlow),
     "absYll": hist.axis.Regular(10, 0., 2.5, name = "absYll", underflow=False, overflow=not args.excludeFlow),
-    "ptll": hist.axis.Variable(dilepton_ptV_binning, name = "ptll", underflow=False, overflow=not args.excludeFlow),
+    "ptll": hist.axis.Variable(common.ptV_binning if not args.finePtBinning else range(60), name = "ptll", underflow=False, overflow=not args.excludeFlow),
     "etaPlus": hist.axis.Regular(int(args.eta[0]), args.eta[1], args.eta[2], name = "etaPlus"),
     "etaMinus": hist.axis.Regular(int(args.eta[0]), args.eta[1], args.eta[2], name = "etaMinus"),
     "etaSum": hist.axis.Regular(12, -4.8, 4.8, name = "etaSum"),
@@ -58,7 +62,6 @@ all_axes = {
     "ptMinus": hist.axis.Regular(int(args.pt[0]), args.pt[1], args.pt[2], name = "ptMinus"),
     "cosThetaStarll": hist.axis.Regular(20, -1., 1., name = "cosThetaStarll", underflow=False, overflow=False),
     "phiStarll": hist.axis.Regular(20, -math.pi, math.pi, circular = True, name = "phiStarll"),
-    #"charge": hist.axis.Regular(2, -2., 2., underflow=False, overflow=False, name = "charge") # categorical axes in python bindings always have an overflow bin, so use a regular
     "massVgen": hist.axis.Variable(ewMassBins, name = "massVgen", overflow=not args.excludeFlow, underflow=not args.excludeFlow),
     "ewMll": hist.axis.Variable(ewMassBins, name = "ewMll", overflow=not args.excludeFlow, underflow=not args.excludeFlow),
     "ewMlly": hist.axis.Variable(ewMassBins, name = "ewMlly", overflow=not args.excludeFlow, underflow=not args.excludeFlow),
@@ -80,8 +83,16 @@ if args.csVarsHist:
 
 nominal_axes = [all_axes[a] for a in nominal_cols] 
 
+groups_to_aggregate = args.aggregateGroups
+
 gen_axes = {
-    "ptVGen": hist.axis.Variable(dilepton_ptV_binning, name = "ptVGen", underflow=False, overflow=False),
+    # "ptVGen": hist.axis.Variable(common.ptV_binning if not args.finePtBinning else range(60), name = "ptVGen", underflow=False, overflow=False),
+    "ptVGen": hist.axis.Variable(
+        #list(range(0,151))+[160., 190.0, 220.0, 250.0, 300.0, 400.0, 500.0, 600.0], 
+        #list(range(0,101)), # this is the same binning as hists from theory corrections
+        [0.0,2.5,5.0,8.0,11.4,14.9,18.5,22.0,25.5,29.0,32.6,36.4,40.4,44.9,50.2,56.4,63.9,73.4,85.4,105.0,132.0,173.0,253.0,600.0], # to match ATLAS binning
+        name = "ptVgen", underflow=False,
+    ),
     "absYVGen": hist.axis.Regular(10, 0, 2.5, name = "absYVGen", underflow=False, overflow=False),  
 }
 
@@ -89,6 +100,32 @@ if args.unfolding:
     unfolding_axes, unfolding_cols, unfolding_selections = differential.get_dilepton_axes(args.genVars, gen_axes)
     datasets = unfolding_tools.add_out_of_acceptance(datasets, group = "Zmumu")
 
+elif args.addHelicityHistos:
+
+    #list(range(0,50,5)).append(np.inf) ,
+    axis_ptVgen = hist.axis.Variable(
+        # ATLAS bins from arxiv:1606.00689
+        [0., 2.5, 5.0, 8.0, 11.4, 14.9, 18.5, 22.0, 25.5, 29.0, 
+        32.6, 36.4, 40.4, 44.9, 50.2, 56.4, 63.9, 73.4, 85.4, 105.0, 132.0, 173.0, 253.0, 600.0],
+        #[0., 5., 10., 15., 20., 25., 30., 35., 40., 45., 50.],
+        #[0., 2.5, 5., 7.5, 10., 12.5, 15., 17.5, 20., 22.5, 25., 30., 35., 40., 45., 50.],
+        name = "ptVgenSig", underflow=False, overflow=True
+    )
+    #axis_ptVgen.append(np.inf)
+    #Taken from w-z gen histomaker     
+    axis_absYVgen = hist.axis.Variable(
+        [0, 0.5, 1., 1.5, 2.0, 2.5],
+        #[0.25*i for i in range(11)],
+        #[0, 1.25, 2.5],
+        name = "absYVgenSig", underflow=False, overflow=False
+    )
+    theoryAgnostic_axes = [axis_absYVgen, axis_ptVgen]
+    theoryAgnostic_cols = ["absYVgen", "ptVgen"] # name of the branch, not of the axis
+    axis_helicity = helicity_utils.axis_helicity_multidim
+    # axis_helicity = hist.axis.Integer(-1, 5, name="helicity", overflow=False, underflow=False)
+    # the following just prepares the existence of the group for out-of-acceptance signal, but doesn't create or define the histogram yet
+    datasets = unfolding_tools.add_out_of_acceptance(datasets, group = "Zmumu")
+    groups_to_aggregate.append("BkgZmumu")
 
 # define helpers
 muon_prefiring_helper, muon_prefiring_helper_stat, muon_prefiring_helper_syst = wremnants.make_muon_prefiring_helpers(era = era)
@@ -114,7 +151,6 @@ else:
 logger.info(f"SF file: {args.sfFile}")
 
 pileup_helper = wremnants.make_pileup_helper(era = era)
-vertex_helper = wremnants.make_vertex_helper(era = era)
 
 calib_filepaths = common.calib_filepaths
 closure_filepaths = common.closure_filepaths
@@ -129,6 +165,38 @@ smearing_helper, smearing_uncertainty_helper = (None, None) if args.noSmearing e
 bias_helper = muon_calibration.make_muon_bias_helpers(args) 
 
 corr_helpers = theory_corrections.load_corr_helpers([d.name for d in datasets if d.name in common.vprocs], args.theoryCorr)
+
+######################################################
+######################################################
+######################################################
+## FIXME/TODO
+## next function should have been imported from theoryAgnostic_tools.py, but requires too many things as input,
+## such as the helpers created here. Since it is effectively a specialization of the loop flow,
+## it is part of the histmaker and is probably fine to have it here.
+## In fact, having this custom function overriding the main graph is probably not the best idea, should rather use the same
+
+# graph building for W sample with helicity weights
+def setTheoryAgnosticGraph(df, results, dataset, nominal_axes_thAgn, nominal_cols_thAgn, args, isZ):
+    logger.info(f"Setting theory agnostic graph for {dataset.name}")
+    df = theoryAgnostic_tools.define_helicity_weights(df, isZ)
+    nominalByHelicity = df.HistoBoost("nominal", nominal_axes_thAgn, [*nominal_cols_thAgn, "nominal_weight_helicity"], tensor_axes=[axis_helicity])
+    results.append(nominalByHelicity)
+
+    if not args.onlyMainHistograms:
+        if not args.onlyTheorySyst:
+            df = syst_tools.add_L1Prefire_unc_hists(results, df, muon_prefiring_helper_stat, muon_prefiring_helper_syst, nominal_axes_thAgn, nominal_cols_thAgn, addhelicity=True)
+            df = syst_tools.add_muon_efficiency_unc_hists(results, df, muon_efficiency_helper_stat, muon_efficiency_helper_syst, nominal_axes_thAgn, nominal_cols_thAgn, what_analysis=thisAnalysis, addhelicity=True)
+        df = syst_tools.add_theory_hists(results, df, args, dataset.name, corr_helpers, qcdScaleByHelicity_helper, nominal_axes_thAgn, nominal_cols_thAgn, for_wmass=False, addhelicity=True)
+    # else:
+    #     #FIXME: hardcoded to keep mass weights, this would be done in add_theory_hists
+    #     df = syst_tools.define_mass_weights(df, dataset.name)
+    #     syst_tools.add_massweights_hist(results, df, nominal_axes_thAgn, nominal_cols_thAgn, proc=dataset.name, addhelicity=True)
+
+######################################################
+######################################################
+######################################################
+
+smearing_weights_procs = []
 
 def build_graph(df, dataset):
     logger.info(f"build graph for dataset: {dataset.name}")
@@ -152,7 +220,7 @@ def build_graph(df, dataset):
     if args.unfolding and dataset.name == "ZmumuPostVFP":
         df = unfolding_tools.define_gen_level(df, args.genLevel, dataset.name, mode="dilepton")
 
-        if hasattr(dataset, "out_of_acceptance"):
+        if hasattr(dataset, "out_of_acceptance"):            
             logger.debug("Reject events in fiducial phase space")
             df = unfolding_tools.select_fiducial_space(df, mode="dilepton", pt_min=args.pt[1], pt_max=args.pt[2], 
                 mass_min=mass_min, mass_max=mass_max, selections=unfolding_selections, accept=False)
@@ -175,6 +243,31 @@ def build_graph(df, dataset):
 
             results.append(df_gen.HistoBoost(f"gen_{obs}", [all_axes[obs]], [obs, "nominal_weight"]))
             df_gen = syst_tools.add_theory_hists(results, df_gen, args, dataset.name, corr_helpers, qcdScaleByHelicity_helper, [all_axes[obs]], [obs], base_name=f"gen_{obs}", for_wmass=False)
+    
+    if args.addHelicityHistos and isZ:
+
+        df = theory_tools.define_prefsr_vars(df)
+
+        # define cuts based on the axes
+        if theoryAgnostic_axes[0].name == "absYVgenSig" and theoryAgnostic_axes[1].name == "ptVgenSig":
+            absYVgenMax = theoryAgnostic_axes[0].edges[-1]
+            ptVgenMax = theoryAgnostic_axes[1].edges[-1]
+        elif theoryAgnostic_axes[1].name == "absYVgenSig" and theoryAgnostic_axes[0].name == "ptVgenSig":
+            absYVgenMax = theoryAgnostic_axes[1].edges[-1]
+            ptVgenMax = theoryAgnostic_axes[0].edges[-1]
+        else:
+            raise Exception("theoryAgnostic_axes should have absYVgenSig, ptVgenSig as axes to use theoryAgnostic_tools.select_fiducial_space()") 
+        
+        if hasattr(dataset, "out_of_acceptance"):
+            logger.debug("Reject events in fiducial phase space")
+            df = theoryAgnostic_tools.select_fiducial_space(df, absYVgenMax=absYVgenMax, ptVgenMax=ptVgenMax, accept=False)
+        else:
+            logger.debug("Select events in fiducial phase space for theory agnostic analysis")
+            df = theoryAgnostic_tools.select_fiducial_space(df, absYVgenMax=absYVgenMax, ptVgenMax=ptVgenMax, accept=True)
+            theoryAgnostic_tools.add_xnorm_histograms(results, df, args, dataset.name, corr_helpers, qcdScaleByHelicity_helper, theoryAgnostic_axes, theoryAgnostic_cols, for_wmass=False)
+            # helicity axis is special, defined through a tensor later, theoryAgnostic_ only includes W rapidity and pt for now
+            axes = [*nominal_axes, *theoryAgnostic_axes]
+            cols = [*nominal_cols, *theoryAgnostic_cols]
 
     df = df.Filter("HLT_IsoTkMu24 || HLT_IsoMu24")
 
@@ -209,8 +302,7 @@ def build_graph(df, dataset):
     df = df.Define("etaDiff", "trigMuons_eta0-nonTrigMuons_eta0") # plus - minus 
 
     if args.csVarsHist:
-        df = df.Define("csSineCosThetaPhill", "wrem::csSineCosThetaPhi(nonTrigMuons_mom4, trigMuons_mom4)")
-    
+        df = df.Define("csSineCosThetaPhill", "wrem::CalccsSineCosThetaPhi(trigMuons_mom4, nonTrigMuons_mom4)")
         df = df.Define("cosThetaStarll", "csSineCosThetaPhill.costheta")
         df = df.Define("phiStarll", "std::atan2(csSineCosThetaPhill.sinphi, csSineCosThetaPhill.cosphi)")
 
@@ -220,13 +312,6 @@ def build_graph(df, dataset):
         results.append(df.HistoBoost("nominal", axes, cols))
     else:
         df = df.Define("weight_pu", pileup_helper, ["Pileup_nTrueInt"])
-        df = df.Define("weight_vtx", vertex_helper, ["GenVtx_z", "Pileup_nTrueInt"])
-        df = df.Define("weight_newMuonPrefiringSF", muon_prefiring_helper, ["Muon_correctedEta", "Muon_correctedPt", "Muon_correctedPhi", "Muon_correctedCharge", "Muon_looseId"])
-
-        weight_expr = "weight_pu*weight_newMuonPrefiringSF*L1PreFiringWeight_ECAL_Nom"
-        if not args.noVertexWeight:
-            weight_expr += "*weight_vtx"            
-
         columnsForSF = ["trigMuons_pt0", "trigMuons_eta0", "trigMuons_SApt0", "trigMuons_SAeta0", "trigMuons_uT0", "trigMuons_charge0", "trigMuons_passTrigger0",
                         "nonTrigMuons_pt0", "nonTrigMuons_eta0", "nonTrigMuons_SApt0", "nonTrigMuons_SAeta0", "nonTrigMuons_uT0", "nonTrigMuons_charge0", "nonTrigMuons_passTrigger0"]
         df = muon_selections.define_muon_uT_variable(df, isWorZ, smooth3dsf=args.smooth3dsf, colNamePrefix="trigMuons")
@@ -235,18 +320,19 @@ def build_graph(df, dataset):
             columnsForSF.remove("trigMuons_uT0")
             columnsForSF.remove("nonTrigMuons_uT0")
 
-        if not args.noScaleFactors:
-            # FIXME: add flags for pass_trigger for both leptons
-            df = df.Define("weight_fullMuonSF_withTrackingReco", muon_efficiency_helper, columnsForSF)
-            weight_expr += "*weight_fullMuonSF_withTrackingReco"
+        # FIXME: add flags for pass_trigger for both leptons
+        df = df.Define("weight_fullMuonSF_withTrackingReco", muon_efficiency_helper, columnsForSF)
+        df = df.Define("weight_newMuonPrefiringSF", muon_prefiring_helper, ["Muon_correctedEta", "Muon_correctedPt", "Muon_correctedPhi", "Muon_correctedCharge", "Muon_looseId"])
 
-        df = df.Define("exp_weight", weight_expr)
+        df = df.Define("exp_weight", "weight_pu*weight_fullMuonSF_withTrackingReco*weight_newMuonPrefiringSF*L1PreFiringWeight_ECAL_Nom")
         df = theory_tools.define_theory_weights_and_corrs(df, dataset.name, corr_helpers, args)
 
         results.append(df.HistoBoost("weight", [hist.axis.Regular(100, -2, 2)], ["nominal_weight"], storage=hist.storage.Double()))
         results.append(df.HistoBoost("nominal", axes, [*cols, "nominal_weight"]))
 
-    for obs in ["ptll", "mll", "yll", "etaPlus", "etaMinus", "ptPlus", "ptMinus"]:
+    obss = ["ptll", "mll", "yll", "etaPlus", "etaMinus", "ptPlus", "ptMinus"]
+    if args.csVarsHist: obss += ['cosThetaStarll', 'phiStarll']
+    for obs in obss:
         if dataset.is_data:
             results.append(df.HistoBoost(f"nominal_{obs}", [all_axes[obs]], [obs]))
         else:
@@ -366,6 +452,15 @@ def build_graph(df, dataset):
     if hasattr(dataset, "out_of_acceptance"):
         # Rename dataset to not overwrite the original one
         dataset.name = "Bkg"+dataset.name
+
+    if isZ and args.addHelicityHistos:
+
+        setTheoryAgnosticGraph(df, results, dataset, axes, cols, args, isZ)
+
+        # ## TODO: this part should be better melted in the rest of the code, there is too much duplication of what could happen later in the loop
+        if hasattr(dataset, "out_of_acceptance"):
+            # Rename dataset to not overwrite the original one
+            dataset.name = "Bkg"+dataset.name
     
     return results, weightsum
 

@@ -42,7 +42,7 @@ struct CSVars {
 
 };
 
-CSVars csSineCosThetaPhi(const PtEtaPhiMVector &antilepton, const PtEtaPhiMVector &lepton)
+CSVars CalccsSineCosThetaPhi(const PtEtaPhiMVector &antilepton, const PtEtaPhiMVector &lepton)
 {
     PxPyPzEVector lepton_v(lepton);
     PxPyPzEVector dilepton = lepton_v + PxPyPzEVector(antilepton);

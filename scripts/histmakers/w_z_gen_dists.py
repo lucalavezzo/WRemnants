@@ -77,6 +77,9 @@ axis_chargeZgen = hist.axis.Integer(
 axis_l_eta_gen = hist.axis.Regular(48, -2.4, 2.4, name = "eta")
 axis_l_pt_gen = hist.axis.Regular(29, 26., 55., name = "pt")
 
+axis_costhetastarll = hist.axis.Regular(10, -1., 1., name = "cosThetaStarll", underflow=False, overflow=False)
+axis_phistarll = hist.axis.Regular(10, -math.pi, math.pi, circular = True, name = "phiStarll")
+
 corr_helpers = theory_corrections.load_corr_helpers(common.vprocs, args.theoryCorr)
 
 def build_graph(df, dataset):
@@ -110,14 +113,20 @@ def build_graph(df, dataset):
     df = theory_tools.define_theory_weights_and_corrs(df, dataset.name, corr_helpers, args)
 
     if isZ:
-        nominal_axes = [axis_massZgen, axis_rapidity, axis_ptVgen, axis_chargeZgen]
+        #nominal_axes = [axis_massZgen, axis_rapidity, axis_ptVgen, axis_chargeZgen]
+        nominal_axes = [axis_rapidity, axis_ptVgen, axis_phistarll, axis_costhetastarll]
         lep_axes = [axis_l_eta_gen, axis_l_pt_gen, axis_chargeZgen]
     else:
         nominal_axes = [axis_massWgen, axis_rapidity, axis_ptVgen, axis_chargeWgen]
         lep_axes = [axis_l_eta_gen, axis_l_pt_gen, axis_chargeWgen]
 
-    nominal_cols = ["massVgen", col_rapidity, "ptVgen", "chargeVgen"]
+    #nominal_cols = ["massVgen", col_rapidity, "ptVgen", "chargeVgen"]
+    nominal_cols = [col_rapidity, "ptVgen", "phiStarll", "cosThetaStarll"]
     lep_cols = ["etaPrefsrLep", "ptPrefsrLep", "chargeVgen"]
+
+    df = df.Define("csSineCosThetaPhill", "wrem::CalccsSineCosThetaPhi(genlanti, genl)")
+    df = df.Define("cosThetaStarll", "csSineCosThetaPhill.costheta")
+    df = df.Define("phiStarll", "std::atan2(csSineCosThetaPhill.sinphi, csSineCosThetaPhill.cosphi)")
 
     if args.singleLeptonHists and (isW or isZ):
         if isW:
