@@ -28,7 +28,8 @@ axis_helicity_multidim = hist.axis.Integer(-1, 8, name="helicitySig", overflow=F
 #creates the helicity weight tensor
 def makehelicityWeightHelper(is_w_like = False, filename=None):
     if filename is None:
-        filename = f"{common.data_dir}/angularCoefficients/w_z_coeffs_absY_scetlib_dyturboCorr.hdf5" 
+        filename = "/data/submit/cms/store/user/lavezzo/ZBosonAnalysis//AngularCoefficients/11_10_2023__13_19_03/w_z_coeffs.hdf5"
+        #filename = f"{common.data_dir}/angularCoefficients/w_z_coeffs_absY_scetlib_dyturboCorr.hdf5" 
     with h5py.File(filename, "r") as ff:
         out = narf.ioutils.pickle_load_h5py(ff["results"])
 
@@ -39,7 +40,7 @@ def makehelicityWeightHelper(is_w_like = False, filename=None):
     if 'muFfact' in corrh.axes.name:
         corrh = corrh[{'muFfact' : 1.j,}]
     
-    axes_names = ['massVgen','absYVgen','ptVgen','chargeVgen', 'helicity']
+    axes_names = ['massVgen','y','ptVgen','chargeVgen', 'helicity']
     if not list(corrh.axes.name) == axes_names:
         raise ValueError (f"Axes [{corrh.axes.name}] are not the ones this functions expects ({axes_names})")
     
