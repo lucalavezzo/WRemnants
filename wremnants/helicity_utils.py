@@ -28,8 +28,8 @@ axis_helicity_multidim = hist.axis.Integer(-1, 8, name="helicitySig", overflow=F
 #creates the helicity weight tensor
 def makehelicityWeightHelper(is_w_like = False, filename=None):
     if filename is None:
-        filename = "/data/submit/cms/store/user/lavezzo/ZBosonAnalysis//AngularCoefficients/11_10_2023__13_19_03/w_z_coeffs.hdf5"
-        #filename = f"{common.data_dir}/angularCoefficients/w_z_coeffs_absY_scetlib_dyturboCorr.hdf5" 
+        #filename = "/data/submit/cms/store/user/lavezzo/ZBosonAnalysis//AngularCoefficients/11_10_2023__13_19_03/w_z_coeffs.hdf5"
+        filename = f"{common.data_dir}/angularCoefficients/w_z_coeffs_absY_scetlib_dyturboCorr.hdf5" 
     with h5py.File(filename, "r") as ff:
         out = narf.ioutils.pickle_load_h5py(ff["results"])
 
@@ -40,7 +40,7 @@ def makehelicityWeightHelper(is_w_like = False, filename=None):
     if 'muFfact' in corrh.axes.name:
         corrh = corrh[{'muFfact' : 1.j,}]
     
-    axes_names = ['massVgen','y','ptVgen','chargeVgen', 'helicity']
+    axes_names = ['massVgen','absYVgen','ptVgen','chargeVgen', 'helicity']
     if not list(corrh.axes.name) == axes_names:
         raise ValueError (f"Axes [{corrh.axes.name}] are not the ones this functions expects ({axes_names})")
     
@@ -53,7 +53,7 @@ def makehelicityWeightHelper(is_w_like = False, filename=None):
     return makeCorrectionsTensor(corrh_noerrs, ROOT.wrem.WeightByHelicityHelper, tensor_rank=1)
 
 #Muon eff vars
-def make_muon_eff_stat_helpers_helicity(helper_stat, nhelicity=6):
+def make_muon_eff_stat_helpers_helicity(helper_stat, nhelicity=9):
     axes = helper_stat.tensor_axes
     nEta = axes[0].size
     nPt = axes[1].size
@@ -65,7 +65,7 @@ def make_muon_eff_stat_helpers_helicity(helper_stat, nhelicity=6):
 
 #1D tensor
 # axis_all = hist.axis.Integer(0, 5, underflow = False, overflow = False, name = "reco-tracking-idip-trigger-iso")
-def make_muon_eff_syst_helper_helicity(helper_syst, nhelicity=6):
+def make_muon_eff_syst_helper_helicity(helper_syst, nhelicity=9):
     nsize=helper_syst.tensor_axes[0].size
     nvars=helper_syst.tensor_axes[1].size
     helper_syst_helicity=ROOT.wrem.tensorRank2_helper_helicity[nsize, nvars, nhelicity]()
@@ -80,13 +80,13 @@ def make_massweight_helper_helicity(mass_axis, nhelicity=9):
 
 #muon prefire
 #this is helcity X <up/down> 
-def make_muon_prefiring_helper_syst_byHelicity(nhelicity=6):
+def make_muon_prefiring_helper_syst_byHelicity(nhelicity=9):
     helper_syst = ROOT.wrem.tensor1D_helper_helicity[2, nhelicity]()
     axis_tensor = [axis_helicity_multidim, common.down_up_axis]
     return helper_syst, axis_tensor
 
 #this is helicity X <Neta,2> type
-def make_muon_prefiring_helper_stat_byHelicity(helper_stat, nhelicity=6):
+def make_muon_prefiring_helper_stat_byHelicity(helper_stat, nhelicity=9):
     nEta = helper_stat.tensor_axes[0].size
     helper_stat_helicity = ROOT.wrem.tensorupdownvar_helper_helicity[nEta, nhelicity]()
     tensor_axes = [axis_helicity_multidim, *helper_stat.tensor_axes]
@@ -94,19 +94,19 @@ def make_muon_prefiring_helper_stat_byHelicity(helper_stat, nhelicity=6):
 
 
 #for muonscale_hist
-def make_dummymuonscale_helper_helicity(nweights, netabins, haxes,nhelicity=6):
+def make_dummymuonscale_helper_helicity(nweights, netabins, haxes,nhelicity=9):
     helper = ROOT.wrem.tensorRank2_helper_helicity[nweights, netabins, nhelicity]()
     tensor_axes = [axis_helicity_multidim, *haxes]
     return helper, tensor_axes
 
 ##for pdf
-def make_pdfweight_helper_helicity(npdf, pdf_axes, nhelicity=6):
+def make_pdfweight_helper_helicity(npdf, pdf_axes, nhelicity=9):
     helper=ROOT.wrem.tensor1D_helper_helicity[npdf, nhelicity]()
     tensor_axes=[axis_helicity_multidim,pdf_axes]
     return helper, tensor_axes
 
 #for qcd scale
-def make_qcdscale_helper_helicity(qcd_axes,nhelicity=6):
+def make_qcdscale_helper_helicity(qcd_axes,nhelicity=9):
     helper = ROOT.wrem.tensorRank2_helper_helicity[3, 3, nhelicity]()
     tensor_axes = [axis_helicity_multidim, *qcd_axes]
     return helper, tensor_axes

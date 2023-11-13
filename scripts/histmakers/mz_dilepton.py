@@ -58,8 +58,8 @@ all_axes = {
     "etaDiff": hist.axis.Variable([-4.8, -1.0, -0.6, -0.2, 0.2, 0.6, 1.0, 4.8], name = "etaDiff"),
     "ptPlus": hist.axis.Regular(int(args.pt[0]), args.pt[1], args.pt[2], name = "ptPlus"),
     "ptMinus": hist.axis.Regular(int(args.pt[0]), args.pt[1], args.pt[2], name = "ptMinus"),
-    "cosThetaStarll": hist.axis.Regular(20, -1., 1., name = "cosThetaStarll", underflow=False, overflow=False),
-    "phiStarll": hist.axis.Regular(20, -math.pi, math.pi, circular = True, name = "phiStarll"),
+    "cosThetaStarll": hist.axis.Regular(8, -1., 1., name = "cosThetaStarll", underflow=False, overflow=False),
+    "phiStarll": hist.axis.Regular(8, -math.pi, math.pi, circular = True, name = "phiStarll"),
     #"charge": hist.axis.Regular(2, -2., 2., underflow=False, overflow=False, name = "charge") # categorical axes in python bindings always have an overflow bin, so use a regular
     "massVgen": hist.axis.Variable(ewMassBins, name = "massVgen", overflow=not args.excludeFlow, underflow=not args.excludeFlow),
     "ewMll": hist.axis.Variable(ewMassBins, name = "ewMll", overflow=not args.excludeFlow, underflow=not args.excludeFlow),
@@ -88,6 +88,10 @@ gen_axes = {
     "ptVGen": hist.axis.Variable(dilepton_ptV_binning, name = "ptVGen", underflow=False, overflow=False),
     "absYVGen": hist.axis.Regular(10, 0, 2.5, name = "absYVGen", underflow=False, overflow=False),  
 }
+# gen_axes = {
+#     "ptVGen": hist.axis.Variable([0, 3, 6, 9.62315, 12.3697, 16.0121, 21.3521, 29.5, 60, 100], name = "ptVGen", underflow=False, overflow=False),
+#     "absYVGen": hist.axis.Variable([0, 0.4, 0.8, 1.2, 1.6, 2, 2.4, 10], name = "absYVGen", underflow=False, overflow=False),  
+# }
 
 if args.unfolding:
     unfolding_axes, unfolding_cols, unfolding_selections = differential.get_dilepton_axes(args.genVars, gen_axes)
@@ -108,6 +112,9 @@ elif args.addHelicityHistos:
         [0, 0.5, 1., 1.5, 2.0, 2.5],
         name = "absYVgenSig", underflow=False, overflow=False
     )
+    #theoryAgnostic_axes = [axis_absYVgen, axis_ptVgen]
+    # axis_ptVgen = hist.axis.Variable([0, 3, 6, 9.62315, 12.3697, 16.0121, 21.3521, 29.5, 60, 100], name = "ptVgenSig", underflow=False, overflow=False)
+    # axis_absYVgen = hist.axis.Variable([0, 0.4, 0.8, 1.2, 1.6, 2, 2.4, 10], name = "absYVgenSig", underflow=False, overflow=False)
     theoryAgnostic_axes = [axis_absYVgen, axis_ptVgen]
     theoryAgnostic_cols = ["absYVgen", "ptVgen"] # name of the branch, not of the axis
     axis_helicity = helicity_utils.axis_helicity_multidim
@@ -254,7 +261,8 @@ def build_graph(df, dataset):
             df = theoryAgnostic_tools.select_fiducial_space(df, absYVgenMax=absYVgenMax, ptVgenMax=ptVgenMax, accept=False)
         else:
             logger.debug("Select events in fiducial phase space for theory agnostic analysis")
-            df = theoryAgnostic_tools.select_fiducial_space(df, absYVgenMax=absYVgenMax, ptVgenMax=ptVgenMax, accept=True)
+            #df = theoryAgnostic_tools.select_fiducial_space(df, absYVgenMax=absYVgenMax, ptVgenMax=ptVgenMax, accept=True)
+            df = theoryAgnostic_tools.select_fiducial_space(df, absYVgenMax=10000, ptVgenMax=10000, accept=True)
             theoryAgnostic_tools.add_xnorm_histograms(results, df, args, dataset.name, corr_helpers, qcdScaleByHelicity_helper, theoryAgnostic_axes, theoryAgnostic_cols, for_wmass=False)
             # helicity axis is special, defined through a tensor later, theoryAgnostic_ only includes W rapidity and pt for now
             axes = [*nominal_axes, *theoryAgnostic_axes]
