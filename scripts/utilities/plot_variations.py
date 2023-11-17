@@ -91,9 +91,11 @@ def proces_systematic(file, process, nominal, sys_name, systematic_up, systemati
     up_hist = file[process][systematic_up].to_hist()
     down_hist = file[process][systematic_down].to_hist()
 
-    nominal1D = np.zeros(nominal_hist.size)
-    up1D = np.zeros(up_hist.size)
-    down1D = np.zeros(down_hist.size)
+    size = nominal_hist.shape[0]*nominal_hist.shape[1]
+
+    nominal1D = np.zeros(size)
+    up1D = np.zeros(size)
+    down1D = np.zeros(size)
 
     nominal1D = unroll_th2d_to_th1d(nominal_hist, nominal1D)
     up1D = unroll_th2d_to_th1d(up_hist, up1D)
@@ -124,7 +126,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Process some integers.')
     parser.add_argument('-p', '--process', required=False, default='Zmumu', type=str, help='the process name')
     parser.add_argument('-f', '--file', type=str, help='the input file name')
-    parser.add_argument('-o', '--out_dir', type=str, help='the output directory')
+    parser.add_argument('-o', '--out_dir', type=str, help='the output directory')    
 
     args = parser.parse_args()
 
