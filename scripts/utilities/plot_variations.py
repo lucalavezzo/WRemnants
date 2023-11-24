@@ -46,6 +46,10 @@ def plot_ratios(sys_name, up, down, nominal):
     ratio_up = np.where(nominal > 1e-4, up / nominal, 1)
     ratio_down = np.where(nominal > 1e-4, down / nominal, 1)
 
+    print(sys_name)
+    print("RATIO UP", ratio_up)
+    print("RATIO DOWN", ratio_down)
+
     ax.plot(ratio_up, label=f"Ratio {sys_name} Up", color="red")
     ax.plot(ratio_down, label=f"Ratio {sys_name} Down", color="blue")
 
@@ -101,6 +105,10 @@ def proces_systematic(file, process, nominal, sys_name, systematic_up, systemati
     up1D = unroll_th2d_to_th1d(up_hist, up1D)
     down1D = unroll_th2d_to_th1d(down_hist, down1D)
 
+    print("NOMINAL", nominal1D)
+    print("up1D", up1D)
+    print("down1D", down1D)
+
     plot_histograms(sys_name, nominal1D, up1D, down1D)
     plot_ratios(sys_name, up1D, down1D, nominal1D)
     plot_histograms_and_ratios(sys_name, nominal1D, up1D, down1D)
@@ -142,11 +150,11 @@ if __name__ == "__main__":
     }  
 
     # ... or automatically add all systmatics matching a certain pattern here
-    parse_hists_for_systematic(systematics, 'nominal_Zmumu', 'resumTNP')
-    parse_hists_for_systematic(systematics, 'nominal_Zmumu', 'Resolution_correction_smearing_variation')
-    parse_hists_for_systematic(systematics, 'nominal_Zmumu', 'Z_nonClosure_parametrized_A')
-    parse_hists_for_systematic(systematics, 'nominal_Zmumu', 'CMS_prefire_stat')
-    parse_hists_for_systematic(systematics, 'nominal_Zmumu', 'massShift')
+    #parse_hists_for_systematic(systematics, 'nominal_Zmumu', 'resumTNP')
+    #parse_hists_for_systematic(systematics, 'nominal_Zmumu', 'Resolution_correction_smearing_variation')
+    #parse_hists_for_systematic(systematics, 'nominal_Zmumu', 'Z_nonClosure_parametrized_A')
+    #parse_hists_for_systematic(systematics, 'nominal_Zmumu', 'CMS_prefire_stat')
+    parse_hists_for_systematic(systematics, 'nominal_Zmumu', 'QCDscaleZfine_PtV11_15helicity_0')
 
     print("Will output the following systematics:")
     print(list(systematics.keys()))

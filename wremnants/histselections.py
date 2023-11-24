@@ -98,7 +98,7 @@ def get_mt_selection(h, thresholdMT=40.0, axis_name_mt="mt", integrateLowMT=True
 
     return nameMT, failMT, passMT
 
-def unrolledHist(h, obs=["pt", "eta"], binwnorm=None):
+def unrolledHist(h, obs=["pt", "eta"], binwnorm=1):
     if obs is not None:
         hproj = h.project(*obs)
     else:

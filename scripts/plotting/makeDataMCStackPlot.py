@@ -203,7 +203,7 @@ for h in args.hists:
             fill_between=args.fillBetween if hasattr(args, "fillBetween") else None, 
             action=action, unstacked=unstack, 
             fitresult=args.fitresult, prefit=args.prefit,
-            xlabel=styles.xlabels.get(h,h), ylabel="Events/bin", rrange=args.rrange, binwnorm=1.0, lumi=groups.lumi,
+            xlabel=styles.xlabels.get(h,h), ylabel="Events/Gev", rrange=args.rrange, binwnorm=1.0, lumi=groups.lumi,
             ratio_to_data=args.ratioToData, rlabel="Pred./Data" if args.ratioToData else "Data/Pred.",
             xlim=args.xlim, no_fill=args.noFill, cms_decor=args.cmsDecor,
             legtext_size=20*args.scaleleg, unstacked_linestyles=args.linestyle if hasattr(args, "linestyle") else [],
