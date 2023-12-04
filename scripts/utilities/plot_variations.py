@@ -1,7 +1,7 @@
 import uproot
 import matplotlib.pyplot as plt
 import numpy as np
-import sys
+import sys, os
 import argparse
 
 def unroll_th2d_to_th1d(hist2D, hist1D):
@@ -77,8 +77,8 @@ def plot_histograms_and_ratios(sys_name, nominal, up, down):
 
     ratio_up = np.where(nominal > 1e-4, up / nominal, 1)
     ratio_down = np.where(nominal > 1e-4, down / nominal, 1)
-    axs[1].plot(ratio_up, label="Ratiof {sys_name} Up", color="red")
-    axs[1].plot(ratio_down, label="Ratiof {sys_name} Down", color="blue")
+    axs[1].plot(ratio_up, label=f"Ratio {sys_name} Up", color="red")
+    axs[1].plot(ratio_down, label=f"Ratio {sys_name} Down", color="blue")
     axs[1].axhline(1, color="black", linestyle="--", linewidth=1)
     axs[1].legend()
     axs[1].set_title("Ratios")
@@ -133,8 +133,8 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description='Process some integers.')
     parser.add_argument('-p', '--process', required=False, default='Zmumu', type=str, help='the process name')
-    parser.add_argument('-f', '--file', type=str, help='the input file name')
-    parser.add_argument('-o', '--out_dir', type=str, help='the output directory')    
+    parser.add_argument('-f', '--file', required=True, type=str, help='the input file name')
+    parser.add_argument('-o', '--out_dir', required=True, type=str, help='the output directory')    
 
     args = parser.parse_args()
 
@@ -142,23 +142,26 @@ if __name__ == "__main__":
     infile = args.file
     out_dir = args.out_dir
 
+    if not os.path.exists(out_dir):
+        os.makedirs(out_dir)
+
     file = uproot.open(infile)
 
     # either add the up and down variation for each systematic by hand here...
     systematics = {
-        'pdfAlphaS' : ('nominal_Zmumu_pdfAlphaSDown_inclusive', 'nominal_Zmumu_pdfAlphaSUp_inclusive'),
+        #'pdfAlphaS' : (f'nominal_{process}_pdfAlphaSDown_inclusive', f'nominal_{process}_pdfAlphaSUp_inclusive'),
     }  
 
     # ... or automatically add all systmatics matching a certain pattern here
-    #parse_hists_for_systematic(systematics, 'nominal_Zmumu', 'resumTNP')
-    #parse_hists_for_systematic(systematics, 'nominal_Zmumu', 'Resolution_correction_smearing_variation')
-    #parse_hists_for_systematic(systematics, 'nominal_Zmumu', 'Z_nonClosure_parametrized_A')
-    #parse_hists_for_systematic(systematics, 'nominal_Zmumu', 'CMS_prefire_stat')
-    parse_hists_for_systematic(systematics, 'nominal_Zmumu', 'QCDscaleZfine_PtV11_15helicity_0')
+    #parse_hists_for_systematic(systematics, f'nominal_{process}', 'resumTNP')
+    #parse_hists_for_systematic(systematics, f'nominal_{process}', 'Resolution_correction_smearing_variation')
+    #parse_hists_for_systematic(systematics, f'nominal_{process}', 'Z_nonClosure_parametrized_A')
+    #parse_hists_for_systematic(systematics, f'nominal_{process}', 'CMS_prefire_stat')
+    parse_hists_for_systematic(systematics, f'nominal_{process}', 'QCDscaleZ')
 
     print("Will output the following systematics:")
     print(list(systematics.keys()))
 
     # process each systematic
     for sys_name, (up, down) in systematics.items():
-        proces_systematic(file, process, 'nominal_Zmumu_inclusive', sys_name, up, down)
+        proces_systematic(file, process, f'nominal_{process}_inclusive', sys_name, up, down)
