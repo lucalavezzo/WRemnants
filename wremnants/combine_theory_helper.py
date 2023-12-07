@@ -49,7 +49,8 @@ class TheoryHelper(object):
             pdf_from_corr=False,
             pdf_action=None,
             scale_pdf_unc=1.,
-            minnlo_unc='byHelicityPt'):
+            minnlo_unc='byHelicityPt',
+            fitAlphaS=False):
 
         self.set_resum_unc_type(resumUnc)
         self.set_np_model(np_model)
@@ -65,6 +66,7 @@ class TheoryHelper(object):
         self.minnlo_unc = minnlo_unc
         self.samples = []
         self.skipFromSignal = False
+        self.fitAlphaS = fitAlphaS
 
     def add_all_theory_unc(self, samples, skipFromSignal=False):
         self.samples = samples
@@ -434,7 +436,7 @@ class TheoryHelper(object):
             processes=['wtau_samples', 'single_v_nonsig_samples'] if self.skipFromSignal else ['single_v_samples'],
             mirror=True if symHessian else False,
             group=pdfName,
-            splitGroup={f"{pdfName}NoAlphaS": '.*'},
+            splitGroup={f"{pdfName}NoAlphaS": '.*'} if not self.fitAlphaS else {},
             passToFakes=self.propagate_to_fakes,
             actionMap=action,
             scale=pdfInfo.get("scale", 1)*scale,
@@ -463,25 +465,38 @@ class TheoryHelper(object):
                     systAxes=[pdf_ax],
                 )
 
-        asRange = pdfInfo['alphasRange']
-        asname = f"{pdfName}alphaS{asRange}" if not from_corr else pdf_hist.replace("Vars", "_pdfas")
-        as_replace = [("as", "pdfAlphaS")]+[("0116", "Down"), ("0120", "Up")] if asRange == "002" else [("0117", "Down"), ("0119", "Up")]
-        as_args = dict(name=asname,
-            processes=['wtau_samples', 'single_v_nonsig_samples'] if self.skipFromSignal else ['single_v_samples'],
-            mirror=False,
-            group=pdfName,
-            splitGroup={f"{pdfName}AlphaS": '.*'},
-            systAxes=["vars" if from_corr else "alphasVar"],
-            scale=0.75 if asRange == "002" else 1.5,
-            passToFakes=self.propagate_to_fakes,
-        )
-        if from_corr:
-            as_args["outNames"] = ['', "pdfAlphaSDown", "pdfAlphaSUp"]
+        if self.fitAlphaS:
+            self.card_tool.addSystematic(f"scetlib_dyturboMSHT20_pdfasCorr",
+                processes=["single_v_samples"],
+                mirror=False,
+                group=f"{pdfName}AlphaS",
+#                splitGroup={f"{pdfName}AlphaS": '.*'},
+                systAxes=["vars"],
+                skipEntries=[{"vars" : "pdf0"}],
+                systNameReplace=[("pdf", "pdfAlphaS")]+[("2", "Down"), ("5", "Up")],
+                passToFakes=self.propagate_to_fakes,
+                noi=True,
+            )
         else:
-            as_args["systNameReplace"] = as_replace
-            as_args['skipEntries'] = [{"alphasVar" : "as0118"}]
-            
-        self.card_tool.addSystematic(**as_args)
+            asRange = pdfInfo['alphasRange']
+            asname = f"{pdfName}alphaS{asRange}" if not from_corr else pdf_hist.replace("Vars", "_pdfas")
+            as_replace = [("as", "pdfAlphaS")]+[("0116", "Down"), ("0120", "Up")] if asRange == "002" else [("0117", "Down"), ("0119", "Up")]
+            as_args = dict(name=asname,
+                processes=['wtau_samples', 'single_v_nonsig_samples'] if self.skipFromSignal else ['single_v_samples'],
+                mirror=False,
+                group=pdfName,
+                splitGroup={f"{pdfName}AlphaS": '.*'},
+                systAxes=["vars" if from_corr else "alphasVar"],
+                scale=0.75 if asRange == "002" else 1.5,
+                passToFakes=self.propagate_to_fakes,
+            )
+            if from_corr:
+                as_args["outNames"] = ['', "pdfAlphaSDown", "pdfAlphaSUp"]
+            else:
+                as_args["systNameReplace"] = as_replace
+                as_args['skipEntries'] = [{"alphasVar" : "as0118"}]
+                
+            self.card_tool.addSystematic(**as_args)
 
     def add_resum_transition_uncertainty(self):
         obs = self.card_tool.fit_axes[:]
