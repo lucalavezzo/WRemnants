@@ -86,7 +86,9 @@ References:
 """
 
 # rabbit / TF imports deferred to the lazy class factories so the module stays
-# importable without rabbit/TF (mirrors np_monotonicity.py).
+# importable without rabbit/TF (mirrors np_monotonicity.py). The λ registry
+# (params) is numpy-only, so it is safe to import at module level.
+from wremnants.postprocessing.scetlib_np.params import active_params
 
 # Forms this wall has damping conditions for. Anything else (frac_*, exp_*,
 # tanh_1, tanh_4, signed_lambda, identity, …) raises rather than silently
@@ -98,20 +100,6 @@ SUPPORTED_FORMS = ("tanh_2", "tanh_6")
 # "square_root"->frac_2) resolve to unsupported forms and so fall through to the
 # raise. Applied to both sides; only "hyp_tangent" reaches a supported form.
 _FORM_ALIASES = {"hyp_tangent": "tanh_2"}
-
-# λ that the walls reference (always present in the model's _param_order, which
-# is built from params.ALL_PARAMS); cross-checked at construction.
-_REQUIRED_PARAMS = (
-    "lambda2_nu",
-    "lambda4_nu",
-    "lambda6_nu",
-    "lambda_inf_nu",
-    "lambda2",
-    "lambda4",
-    "lambda6",
-    "delta_lambda2",
-    "lambda_inf",
-)
 
 # Fixed knobs (NOT CLI options — edit here to test). Only ``smallb`` is exposed
 # on the -r line; these are deliberately constants to keep that line minimal.
@@ -172,6 +160,7 @@ def _make_mapping_class():
 
 def _make_regularizer_class():
     import tensorflow as tf
+
     from rabbit.regularization.regularizer import Regularizer
 
     class NPDampingWall(Regularizer):
@@ -205,12 +194,6 @@ def _make_regularizer_class():
 
             self._order = tuple(model._param_order)
             self._pidx = {name: i for i, name in enumerate(self._order)}
-            missing = [p for p in _REQUIRED_PARAMS if p not in self._pidx]
-            if missing:
-                raise ValueError(
-                    f"NPDampingWall: model param order {self._order} is missing "
-                    f"required λ {missing}."
-                )
 
             # FIT (numerator) forms — the ones the fit integrates, which the wall
             # must constrain (NOT the card/denominator form). Resolve aliases and
@@ -222,6 +205,21 @@ def _make_regularizer_class():
             self._np_model = self._resolve_form(
                 forms["np_model"], side="TMD (F_eff, np_model)"
             )
+
+            # Required λ come from the CENTRAL REGISTRY, keyed on the resolved
+            # forms — the SAME source (active_params) the model uses to build
+            # _param_order. Each model has its own λ vocabulary (e.g. tanh_2 has
+            # no λ6*), so the wall can never require a λ the chosen model omits.
+            required = active_params(
+                np_model=self._np_model, np_model_nu=self._np_model_nu
+            )
+            missing = [p for p in sorted(required) if p not in self._pidx]
+            if missing:
+                raise ValueError(
+                    f"NPDampingWall: model param order {self._order} is missing "
+                    f"λ {missing} required by the fit forms "
+                    f"(np_model={self._np_model!r}, np_model_nu={self._np_model_nu!r})."
+                )
 
             self._cast = lambda v: tf.constant(v, dtype=self.dtype)
             # Model-param block is x[:nparams]; nparams resolved at set_expectations.
@@ -277,12 +275,12 @@ def _make_regularizer_class():
             # ---- CS-side γ_ν^NP damping: P(u)=λ2_ν·u+λ4_ν·u²+λ6_ν·u³ ≥ 0 ∀u≥0.
             l2nu = self._lam(params, "lambda2_nu")
             l4nu = self._lam(params, "lambda4_nu")
-            l6nu = self._lam(params, "lambda6_nu")
             linfnu = self._lam(params, "lambda_inf_nu")
             pens = [relu2(eps - linfnu)]  # λ∞_ν > 0 (saturation-scale regime)
             if self._np_model_nu == "tanh_2":
                 pens.append(wall(l4nu))  # λ4_ν ≥ margin  (large-b leading)
-            else:  # tanh_6
+            else:  # tanh_6 — λ6_ν only exists in the tanh_6 vocabulary
+                l6nu = self._lam(params, "lambda6_nu")
                 pens.append(wall(l6nu))  # λ6_ν ≥ margin  (large-b leading)
                 # interior: λ4_ν ≥ 0 OR λ4_ν² ≤ 4·λ2_ν·λ6_ν. Self-gating — the
                 # relu2(-l4nu) vanishes for λ4_ν ≥ 0, so no penalty there; and no
@@ -296,9 +294,10 @@ def _make_regularizer_class():
             # all conditions stay division-free (multiply through by 3·λ∞² > 0).
             l2 = self._lam(params, "lambda2")
             l4 = self._lam(params, "lambda4")
-            l6 = self._lam(params, "lambda6")
             dl2 = self._lam(params, "delta_lambda2")
             linf = self._lam(params, "lambda_inf")
+            # λ6 only exists in the tanh_6 vocabulary; read it only when used.
+            l6 = self._lam(params, "lambda6") if self._np_model == "tanh_6" else None
             pens.append(relu2(eps - linf))  # λ∞ > 0
             linf2 = linf * linf
             for y_sq in (0.0, self.ymax * self.ymax):
