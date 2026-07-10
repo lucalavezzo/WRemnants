@@ -128,8 +128,11 @@ Step 3 — σ_reco(λ; b): fold gen → reco through the response matrix
     P(b | g)     = R_raw(b, g) / N_gen(g)               (efficiency × migration)
     σ_reco(λ; b) = Σ_g  P(b | g) · σ_gen(λ; g)
 
-g = gen bin (ptVGen, |Y|), summed over by Σ_g; b = reco bin (ptll, yll,
-cosThetaStarll_quantile, phiStarll_quantile). P(b | g) is the gen→reco map (one
+g = gen bin (ptVGen, |Y|), summed over by Σ_g; b = reco bin — the fit channel's
+axes, any prefix subset of the canonical (ptll, yll, cosThetaStarll_quantile,
+phiStarll_quantile) order (e.g. a 2D ptll-yll fit; the embedded 4D R is
+marginalized over the missing axes, see ``_marginalize_R_reco``). P(b | g) is
+the gen→reco map (one
 reco column per gen bin), so σ_reco is σ_gen pushed through the detector; Σ_g is
 ``tf.linalg.matvec(self.R, σ_gen_flat)``. Pure detector folding — no λ_central or
 ratio here (that is Step 4).
@@ -207,7 +210,6 @@ for Asimov and the default; full-K is for real/toy data. Do NOT enable during th
 fit. Full derivation, GN-vs-full-K, and the exact commands: ``docs/HESSIAN_PLAN.md``.
 """
 
-import os
 from typing import Mapping, Optional
 
 import numpy as np
@@ -224,12 +226,12 @@ from wremnants.postprocessing.scetlib_np import lambda_central as scetlib_lambda
 # module). ``fz_tf`` is still needed for the reco-side tensor dtype (``fz_tf.DTYPE``).
 from wremnants.postprocessing.scetlib_np.params import active_params, param_defaults
 from wremnants.postprocessing.scetlib_np.sigma_gen import (  # noqa: F401
+    _NONSING_DYTURBO_DEFAULT,
+    _NONSING_FO_SING_DEFAULT,
     ALL_PARAMS,
     EFF_PARAMS,
     GNU_PARAMS,
     SigmaGenModel,
-    _NONSING_DYTURBO_DEFAULT,
-    _NONSING_FO_SING_DEFAULT,
     _default_btgrid_dir,
     compute_nonsingular_gen,
 )
@@ -248,6 +250,7 @@ _DISCRETE_NP_SUBSTRING = "scetlibnp"
 #     the extreme (r ~ -1e43) case, keeping the yield strictly > 0 (no NaN).
 RATIO_FLOOR_SCALE = 1.0e-4
 RATIO_FLOOR_MIN = 1.0e-9
+
 
 def _crop_R_to_fit(R, R_reco_axes, fit_reco_axes, tol=1e-9):
     """Crop R's trailing reco bins so its reco shape matches the fit.
@@ -280,6 +283,41 @@ def _crop_R_to_fit(R, R_reco_axes, fit_reco_axes, tol=1e-9):
     # Keep all gen axes (the remaining axes of R).
     slices += (slice(None),) * (R.ndim - len(fit_reco_axes))
     return R[slices]
+
+
+def _marginalize_R_reco(R, R_reco_axes, fit_axis_names):
+    """Sum R over the reco axes the fit channel doesn't have.
+
+    The datacard embeds R at the canonical reco binning (the full 4D
+    ptll/yll/cosThetaStar*/phiStar* grid, see ``params.RECO_AXES``) regardless
+    of the fit channel's dimensionality. R(b, g) is a counts response, so the
+    response for a lower-dimensional reco channel (e.g. a 2D ptll-yll fit) is
+    exactly the marginal over the dropped reco axes — sum them out here. Gen
+    axes (the trailing axes of R) are untouched. The kept axes must appear in
+    the fit's order (both follow the canonical ordering, so a mismatch means a
+    non-canonical fit channel, which the crop couldn't handle either).
+    """
+    R_names = [n for n, _ in R_reco_axes]
+    missing = [n for n in fit_axis_names if n not in R_names]
+    if missing:
+        raise ValueError(f"Fit reco axes {missing} not among R's reco axes {R_names}")
+    kept = [n for n in R_names if n in fit_axis_names]
+    if kept != list(fit_axis_names):
+        raise ValueError(
+            f"Fit reco-axis order {list(fit_axis_names)} doesn't match R's "
+            f"canonical order {kept}"
+        )
+    drop = tuple(i for i, n in enumerate(R_names) if n not in fit_axis_names)
+    if drop:
+        R = R.sum(axis=drop)
+        print(
+            f"[SCETlibNPParamModel] marginalized R over reco axes "
+            f"{[R_names[i] for i in drop]} (fit channel is "
+            f"{len(fit_axis_names)}D: {list(fit_axis_names)})",
+            flush=True,
+        )
+    reco_axes = [(n, e) for n, e in R_reco_axes if n in fit_axis_names]
+    return R, reco_axes
 
 
 def _R_info_from_auxiliary(indata):
@@ -556,11 +594,17 @@ class SCETlibNPParamModel(ParamModel):
         else:
             # ---- R matrix (read from the datacard's scetlib_np auxiliary)
             R_info = _R_info_from_auxiliary(indata)
+            fit_reco_axes = self._fit_reco_axes(indata)
+            # The auxiliary R carries the canonical (4D) reco binning whatever
+            # the fit channel is; a lower-dimensional channel (e.g. 2D ptll-yll)
+            # uses the marginal response — sum R over the axes the fit lacks.
+            R_full, R_reco_axes = _marginalize_R_reco(
+                R_info["R"], R_info["reco_axes"], [n for n, _ in fit_reco_axes]
+            )
             # Fit-tensor reco binning may differ from R's by trailing overflow bins
             # (e.g. R has ptll [0, …, 44, 100] while the fit ends at 44). Crop R's
             # trailing bins so the reco shape matches.
-            fit_reco_axes = self._fit_reco_axes(indata)
-            R_arr = _crop_R_to_fit(R_info["R"], R_info["reco_axes"], fit_reco_axes)
+            R_arr = _crop_R_to_fit(R_full, R_reco_axes, fit_reco_axes)
             self.reco_shape = R_arr.shape[: len(fit_reco_axes)]
             gen_axes = R_info["gen_axes"]
             # Gen-total denominator N_gen(g) from the xnorm hist ("prefsr"):
@@ -579,7 +623,7 @@ class SCETlibNPParamModel(ParamModel):
             self._reco_axes_meta = [
                 (name, fit_axes[1])
                 for (name, fit_axes) in zip(
-                    [a[0] for a in R_info["reco_axes"]],
+                    [a[0] for a in R_reco_axes],
                     fit_reco_axes,
                 )
             ]
@@ -706,9 +750,7 @@ class SCETlibNPParamModel(ParamModel):
                 f"({self._np_model_fit}/{self._np_model_nu_fit}); "
                 f"active λ: {sorted(active)}"
             )
-        nou_params = tuple(
-            p for p in ALL_PARAMS if p in active and p not in poi_params
-        )
+        nou_params = tuple(p for p in ALL_PARAMS if p in active and p not in poi_params)
         self._param_order = poi_params + nou_params
         self.npoi = len(poi_params)
         self.npou = len(nou_params)
@@ -961,7 +1003,9 @@ class SCETlibNPParamModel(ParamModel):
             f"{type(self).__name__!r} object has no attribute {name!r}"
         )
 
-    def _sigma_YqT_native_at(self, eff_params, gnu_params, np_model=None, np_model_nu=None):
+    def _sigma_YqT_native_at(
+        self, eff_params, gnu_params, np_model=None, np_model_nu=None
+    ):
         """Backward-compat alias for :meth:`SigmaGenModel.sigma_YqT_native` — the
         native (NY, NqT) Q-integrated σ(λ) before the |Y|-fold / qT-rebin.
         ``np_model`` / ``np_model_nu`` override the form (default: card form)."""
@@ -976,8 +1020,11 @@ class SCETlibNPParamModel(ParamModel):
         σ_gen(λ) on the (NptVGen, NabsYVGen) gen grid (Steps 1–2).
         ``np_model`` / ``np_model_nu`` override the form (default: card form)."""
         return self.core.sigma_gen(
-            eff_params, gnu_params, sigma_YqT=sigma_YqT,
-            np_model=np_model, np_model_nu=np_model_nu,
+            eff_params,
+            gnu_params,
+            sigma_YqT=sigma_YqT,
+            np_model=np_model,
+            np_model_nu=np_model_nu,
         )
 
     # =========================================================================

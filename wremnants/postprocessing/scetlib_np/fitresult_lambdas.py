@@ -22,8 +22,10 @@ Two fit flavours, SEPARATE readers, both emitting the same
 
 Units: the new-model λ are already physical (see ``param_model`` /
 ``allowNegativeParam``); no conversion. The ``np_model`` / ``np_model_nu`` strings
-the curves need come from :func:`lambda_central.read_lambda_central` (read off the
-fitresults), with a CLI/argument override.
+the curves need are the FIT (numerator) forms: the ``np_model_fit`` /
+``np_model_nu_fit`` override tokens rabbit stored in the fitresults meta when
+given, else the card (denominator) form from
+:func:`lambda_central.read_lambda_central`, with a CLI/argument override on top.
 
 CLI (print the table)::
 
@@ -39,7 +41,12 @@ import numpy as np
 from rabbit import io_tools
 from wremnants.postprocessing.scetlib_np import lambda_central as _lc
 from wremnants.postprocessing.scetlib_np.np_function_plots import NPLambdas, Series
-from wremnants.postprocessing.scetlib_np.params import ALL_PARAMS, EFF_PARAMS, GNU_PARAMS
+from wremnants.postprocessing.scetlib_np.params import (
+    ALL_PARAMS,
+    EFF_PARAMS,
+    GNU_PARAMS,
+)
+
 SECTOR = {
     **{p: "gamma_nu (CS)" for p in GNU_PARAMS},
     **{p: "F_eff (TMD)" for p in EFF_PARAMS},
@@ -253,22 +260,25 @@ def _flat_values(fitresult_path, which="postfit", result=None):
 
 
 def _resolve_models(fitresult_path, np_model=None, np_model_nu=None):
-    """np_model strings from lambda_central (read off the fitresults), falling
-    back to defaults if the upstream pkl is unreachable. Explicit arguments win."""
+    """The FIT (numerator) np_model strings. Explicit arguments win, then
+    :func:`lambda_central.read_np_models` (the central resolver: card form
+    overridden by the fit's ``np_model_(nu_)fit`` tokens), then the defaults."""
     if np_model and np_model_nu:
         return np_model, np_model_nu
     eff_model, gnu_model = DEFAULT_NP_MODEL, DEFAULT_NP_MODEL_NU
     try:
-        lc = _lc.read_lambda_central(fitresult_path)
-        eff_model = lc["eff_params"].get("np_model", eff_model)
-        gnu_model = lc["gnu_params"].get("np_model_nu", gnu_model)
-    except Exception as exc:  # pkl unreachable / non-NP fit: warn, use defaults
+        eff_model, gnu_model = _lc.read_np_models(fitresult_path)
+    except Exception as exc:  # metadata unreadable / non-NP fit: warn, use defaults
         print(
-            f"[fitresult_lambdas] could not read np_model from {fitresult_path} "
-            f"({exc}); using defaults {eff_model!r}/{gnu_model!r}. "
+            f"[fitresult_lambdas] could not read the np_model forms from "
+            f"{fitresult_path} ({exc}); using defaults "
+            f"{DEFAULT_NP_MODEL!r}/{DEFAULT_NP_MODEL_NU!r}. "
             f"Pass --np-model/--np-model-nu to override."
         )
-    return np_model or eff_model, np_model_nu or gnu_model
+    return (
+        np_model or eff_model or DEFAULT_NP_MODEL,
+        np_model_nu or gnu_model or DEFAULT_NP_MODEL_NU,
+    )
 
 
 def lambdas_from_fitresult(
@@ -393,7 +403,9 @@ def _template_base_eff_gnu(param_map):
         np_model="tanh_6",
     )
     gnu = dict(
-        lambda_inf_nu=0.0, lambda2_nu=0.0, lambda4_nu=0.0,
+        lambda_inf_nu=0.0,
+        lambda2_nu=0.0,
+        lambda4_nu=0.0,
         lambda6_nu=0.0007,  # SCETlib NP_model_gammanu b⁶ coeff (Gamma_nu.hpp:102)
         np_model_nu="tanh_6",
     )

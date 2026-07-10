@@ -11,7 +11,11 @@ The λ to evaluate at = a physical BASE tune + overrides:
     runcard / else the canonical FranksVals tanh_2 default. The model is BUILT at
     this base (positive σ_gen, which the constructor requires); λ are evaluated on
     top, so params not set stay at the BASE value, not 0;
-  * ``--fitresult HDF5`` postfit λ (optional);
+  * ``--fitresult HDF5`` postfit λ (optional). Also sources the base tune from the
+    fitresults metadata when ``--meta-from`` is not given, and applies the fit's
+    ``np_model_(nu_)fit`` NUMERATOR-form override (if any) to the EVALUATION —
+    construction stays at the base (card/denominator) form, mirroring
+    ``param_model``;
   * ``--lambdas name=val,...`` explicit values (optional; win over the rest).
 Common use is ``--lambdas lambda2=0.5``, the rest staying at FranksVals; no
 λ_central source needed. Evaluating, unlike constructing, has no positivity
@@ -46,7 +50,6 @@ Run inside a container that binds the inputs (same as the validation scripts):
 """
 
 import argparse
-import os
 import sys
 import time
 
@@ -57,283 +60,19 @@ from wremnants.postprocessing.scetlib_np.params import (
     GNU_PARAMS,
     parse_lambda_overrides,
 )
+from wremnants.postprocessing.scetlib_np.sigma_gen import _default_btgrid_dir
 
-# btgrid default mirrors the validation scripts; the datacard is intentionally
-# NOT defaulted — pass --datacard (or explicit --*-edges) for the gen edges.
-BTGRID_DIR = "/scratch/submit/cms/wmass/scetlib_np/Z_COM13_CT18Z_N3p0LL_btgrid_fineall/"
-Q_LO, Q_HI = 60.0, 120.0
-# Canonical FranksVals (CT18Z N3+0LL lattice λ4-bugfix) tanh_2 runcard — the
-# production λ_central. Construction BASE when no base λ is sourced: the model
-# must be built at a PHYSICAL tune (positive σ_gen, so the constructor's response
-# guard passes), and the requested λ evaluated on top. Source of truth: a
-# correction file's Nonperturbative section (file_meta_data → config →
-# Nonperturbative); the LatticeNPLambda4Bugfix_FranksVals_CT18Z values.
-CANONICAL_BASE = {
-    "eff_params": {
-        "np_model": "tanh_2", "lambda2": 0.4, "lambda4": 0.4,
-        "lambda6": 0.0, "delta_lambda2": 0.0, "lambda_inf": 1.0,
-    },
-    "gnu_params": {
-        "np_model_nu": "tanh_2", "lambda2_nu": 0.15,
-        "lambda4_nu": 0.0, "lambda6_nu": 0.0, "lambda_inf_nu": 2.0,
-    },
-}
-
-# Built-in gen grid used when neither explicit edges nor a datacard/hdf5 source is
-# given: 1-GeV ptVGen bins over [0, 40], rapidity-inclusive in a single absYVGen
-# bin [0, 5] (5.0 is a TheoryCorrection absY edge, so the overlay still aligns).
-DEFAULT_PTV_EDGES = np.arange(0.0, 41.0, 1.0)
-DEFAULT_ABSY_EDGES = np.array([0.0, 5.0])
-
-# corr-hist axis ↔ model gen axis (the TheoryCorrection _hist uses SCETlib names).
-_CORR_AXIS = {"ptVGen": "qT", "absYVGen": "absY"}
-
-
-def _parse_edges(s):
-    """``a,b,c,...`` -> float ndarray of bin edges."""
-    return np.array([float(x) for x in s.split(",") if x.strip()], dtype=np.float64)
-
-
-def _merge_matrix(fine_edges, coarse_edges, name="axis", tol=1e-6):
-    """(N_coarse, N_fine) 0/1 matrix summing fine bins into coarse bins.
-
-    Requires every coarse edge to coincide with a fine edge (coarse is a
-    sub-binning of fine): exact merge, no interpolation. Fine bins whose centre
-    lies outside every coarse bin (e.g. qT beyond the model's ptVGen overflow
-    edge) get weight 0 and are dropped, matching the model.
-    """
-    fine_edges = np.asarray(fine_edges, dtype=np.float64)
-    coarse_edges = np.asarray(coarse_edges, dtype=np.float64)
-    for e in coarse_edges:
-        if not np.any(np.isclose(fine_edges, e, atol=tol)):
-            raise SystemExit(
-                f"_merge_matrix[{name}]: model edge {e} is not a TheoryCorrection "
-                f"bin edge (its binning is not a refinement of the model grid on "
-                f"this axis). corr edges: {fine_edges}"
-            )
-    centers = 0.5 * (fine_edges[:-1] + fine_edges[1:])
-    W = np.zeros((coarse_edges.size - 1, fine_edges.size - 1), dtype=np.float64)
-    for i in range(coarse_edges.size - 1):
-        m = (centers >= coarse_edges[i]) & (centers <= coarse_edges[i + 1])
-        W[i, m] = 1.0
-    return W
-
-
-def resolve_base_lambda(args):
-    """Physical BASE λ tune (eff_params/gnu_params) the model is CONSTRUCTED at.
-
-    Priority: ``--meta-from HDF5`` > the ``--theory-corr`` file's embedded
-    Nonperturbative runcard > the canonical FranksVals tanh_2 default. Always a
-    complete physical tune (never None), so construction lands on a positive-σ_gen
-    point (the constructor's response guard); the requested λ are evaluated on top.
-    """
-    from wremnants.postprocessing.scetlib_np import lambda_central as lc
-
-    if args.meta_from:
-        print(f"[λ base] from hdf5 metadata {args.meta_from}")
-        return lc.read_lambda_central(args.meta_from)
-    if args.theory_corr:
-        import pickle
-
-        import lz4.frame
-
-        with lz4.frame.open(args.theory_corr) as fh:
-            corr = pickle.load(fh)
-        base = lc.extract_lambda_central(
-            corr, tag=os.path.basename(args.theory_corr),
-            proc=args.theory_corr_proc or "Z",
-        )
-        print(f"[λ base] from the --theory-corr Nonperturbative runcard "
-              f"({base.get('basename')})")
-        return {"eff_params": base["eff_params"], "gnu_params": base["gnu_params"]}
-    print("[λ base] none given -> canonical FranksVals tanh_2 default")
-    return CANONICAL_BASE
-
-
-def assemble_tune(base, overrides):
-    """Full (eff_params, gnu_params) for the EVAL point = base tune + overrides,
-    plus the explicitly-set names.
-
-    ``base`` is a physical lambda_central dict (with the np_model form strings);
-    params not in ``overrides`` stay at the base value (NOT 0). Each override is
-    routed to eff or gnu by membership."""
-    eff = dict(base["eff_params"])
-    gnu = dict(base["gnu_params"])
-    explicit = {}
-    for name, val in overrides.items():
-        if name in EFF_PARAMS:
-            eff[name] = val
-        elif name in GNU_PARAMS:
-            gnu[name] = val
-        else:
-            raise SystemExit(
-                f"unknown λ {name!r}; valid: {list(GNU_PARAMS) + list(EFF_PARAMS)}"
-            )
-        explicit[name] = val
-    return eff, gnu, explicit
-
-
-def resolve_gen_axes(args):
-    """gen_axes = [(ptVGen, edges), (absYVGen, edges)], chosen per axis in order:
-    explicit --ptv-edges/--absy-edges, then a --gen-edges-from/--datacard hdf5,
-    then the built-in defaults (1-GeV ptVGen [0,40]; single absYVGen [0,5])."""
-    ptv = _parse_edges(args.ptv_edges) if args.ptv_edges else None
-    absy = _parse_edges(args.absy_edges) if args.absy_edges else None
-    src = args.gen_edges_from or args.datacard
-
-    src_axes = None
-    if (ptv is None or absy is None) and src:
-        print(f"[gen-axes] reading the scetlib_np auxiliary of {src}")
-        from rabbit.inputdata import FitInputData
-
-        from wremnants.postprocessing.scetlib_np.param_model import (
-            _R_info_from_auxiliary,
-        )
-
-        indata = FitInputData(src)
-        src_axes = {
-            n: np.asarray(e, dtype=np.float64)
-            for n, e in _R_info_from_auxiliary(indata)["gen_axes"]
-        }
-
-    def pick(name, explicit, default):
-        if explicit is not None:
-            print(f"[gen-axes] {name}: explicit ({explicit.size - 1} bins)")
-            return explicit
-        if src_axes is not None and name in src_axes:
-            print(f"[gen-axes] {name}: from {src} ({src_axes[name].size - 1} bins)")
-            return src_axes[name]
-        print(f"[gen-axes] {name}: built-in default ({default.size - 1} bins, "
-              f"[{default[0]:g}, {default[-1]:g}])")
-        return default
-
-    return [
-        ("ptVGen", pick("ptVGen", ptv, DEFAULT_PTV_EDGES)),
-        ("absYVGen", pick("absYVGen", absy, DEFAULT_ABSY_EDGES)),
-    ]
-
-
-def load_theory_corr_hist(path, proc=None):
-    """Load the ``{generator}_hist`` (SCETlib+DYTurbo) Hist from a TheoryCorrection
-    ``.pkl.lz4``.
-
-    The file maps ``corr[proc][histname]``. ``proc`` defaults to the single
-    physics key (``meta_data`` / ``file_meta_data`` excluded); the hist is the
-    lone ``*_hist`` that is not ``minnlo_ref_hist`` (the prediction, not the
-    MiNNLO reference or the ratio).
-    """
-    import pickle
-
-    import lz4.frame
-
-    with lz4.frame.open(path) as fh:
-        corr = pickle.load(fh)
-
-    meta_keys = {"meta_data", "file_meta_data"}
-    procs = [k for k in corr.keys() if k not in meta_keys]
-    if proc is None:
-        if len(procs) != 1:
-            raise SystemExit(
-                f"--theory-corr-proc needed: {os.path.basename(path)} has procs {procs}"
-            )
-        proc = procs[0]
-    elif proc not in corr:
-        raise SystemExit(f"proc {proc!r} not in {list(corr.keys())}")
-
-    entry = corr[proc]
-    cands = [k for k in entry if k.endswith("_hist") and k != "minnlo_ref_hist"]
-    if len(cands) != 1:
-        raise SystemExit(
-            f"expected one {{generator}}_hist in {proc}; found {list(entry.keys())}"
-        )
-    histname = cands[0]
-
-    print(f"[theory-corr] {os.path.basename(path)} :: {proc} / {histname}")
-    return entry[histname]
-
-
-def theory_corr_projection(h, gen_axes, plot_axis, var="pdf0", q_window=(Q_LO, Q_HI),
-                           tol=1e-6):
-    """Project a TheoryCorrection ``_hist`` onto the model's ``plot_axis`` gen bins.
-
-    Reduces the (Q, absY, qT, charge, vars) Hist to a 1-D bin-integrated σ on the
-    model's ``plot_axis`` edges, restricted to the model's gen-grid extent on the
-    OTHER axis so it covers the same phase space the model σ_gen projection does:
-
-      1. select the ``vars`` entry (default ``pdf0`` = central tune);
-      2. sum the Q bins whose centre falls in ``q_window`` (in-range only);
-      3. sum the charge axis (in-range), if present;
-      4. sum the OTHER gen axis over the model's extent [0, other_max];
-      5. rebin the projection axis onto the model's ``plot_axis`` edges (model
-         edges must be a sub-binning of the corr hist's: qT is fine enough that
-         ptVGen always aligns; absY uses SCETlib's binning so absYVGen may not).
-
-    Returns an ndarray of length ``len(plot_axis edges) - 1`` (bin-integrated σ).
-    """
-    names = [n for n, _ in gen_axes]
-    if plot_axis not in names or plot_axis not in _CORR_AXIS:
-        raise SystemExit(f"--plot-axis {plot_axis!r} not a model gen axis {names}")
-    edges_by_name = {n: np.asarray(e, dtype=np.float64) for n, e in gen_axes}
-    other_model = names[1] if plot_axis == names[0] else names[0]
-    proj_corr = _CORR_AXIS[plot_axis]
-    other_corr = _CORR_AXIS[other_model]
-
-    have = [a.name for a in h.axes]
-    for need in ("Q", proj_corr, other_corr, "vars"):
-        if need not in have:
-            raise SystemExit(
-                f"theory-corr hist missing {need!r} axis; has {have}"
-            )
-
-    # 1. vars selection.
-    vlist = list(h.axes["vars"])
-    if var not in vlist:
-        raise SystemExit(
-            f"--theory-corr-var {var!r} not in corr hist vars; have {vlist}"
-        )
-    h = h[{"vars": vlist.index(var)}]
-
-    # 2. Q window (sum in-range bins whose centre is inside the window).
-    qe = np.asarray(h.axes["Q"].edges, dtype=np.float64)
-    qc = 0.5 * (qe[:-1] + qe[1:])
-    qsel = np.where((qc >= q_window[0] - tol) & (qc <= q_window[1] + tol))[0]
-    if not qsel.size:
-        raise SystemExit(f"no Q bins in window {q_window}; corr Q edges {qe}")
-    h = h[{"Q": slice(int(qsel[0]), int(qsel[-1]) + 1, sum)}]
-
-    # 3. charge sum (in-range), if a charge axis is present.
-    if "charge" in [a.name for a in h.axes]:
-        h = h[{"charge": slice(0, h.axes["charge"].size, sum)}]
-
-    # 4. sum the OTHER axis over the model's extent [0, other_max]. Non-coinciding
-    #    upper edge (SCETlib's absY binning): cut at the nearest corr edge, warn.
-    other_max = edges_by_name[other_model][-1]
-    oe = np.asarray(h.axes[other_corr].edges, dtype=np.float64)
-    oc = 0.5 * (oe[:-1] + oe[1:])
-    osel = np.where(oc <= other_max + tol)[0]
-    if not osel.size:
-        raise SystemExit(
-            f"theory-corr {other_corr} has no bins below the model {other_model} "
-            f"max {other_max}; corr edges {oe}"
-        )
-    cut_idx = int(osel[-1]) + 1
-    actual_edge = oe[cut_idx]
-    if abs(actual_edge - other_max) > tol:
-        print(
-            f"[theory-corr] WARNING: model {other_model} max {other_max} does not "
-            f"coincide with a corr {other_corr} edge; summing corr up to "
-            f"{actual_edge} ({abs(actual_edge - other_max):.3g} off)."
-        )
-    h = h[{other_corr: slice(0, cut_idx, sum)}]
-
-    # 5. rebin the projection axis onto the model's plot_axis edges.
-    W = _merge_matrix(
-        np.asarray(h.axes[proj_corr].edges, dtype=np.float64),
-        edges_by_name[plot_axis],
-        name=plot_axis,
-        tol=tol,
-    )
-    return W @ np.asarray(h.values(flow=False), dtype=np.float64)
+# The λ-tune resolvers + the theory-correction reference loader/projection now
+# live in the shared validation library so the CLIs share one implementation.
+from wremnants.postprocessing.scetlib_np.validation.agreement import (
+    Q_HI,
+    Q_LO,
+    assemble_tune,
+    load_theory_corr_hist,
+    resolve_base_lambda,
+    resolve_gen_axes,
+    theory_corr_projection,
+)
 
 
 def _lambda_box_text(eff, gnu):
@@ -350,8 +89,17 @@ def _lambda_box_text(eff, gnu):
     return "λ tune:\n" + "\n".join(lines)
 
 
-def make_projection_plot(sigma_gen, gen_axes, axis, out_path, eff, gnu,
-                         s_corr=None, corr_label=None):
+def make_projection_plot(
+    sigma_gen,
+    gen_axes,
+    axis,
+    out_path,
+    eff,
+    gnu,
+    s_corr=None,
+    corr_label=None,
+    args=None,
+):
     """Step histogram of the matched σ_gen(λ) projection onto one gen axis
     (default ptVGen = ptZ), summing over the other.
 
@@ -388,7 +136,10 @@ def make_projection_plot(sigma_gen, gen_axes, axis, out_path, eff, gnu,
 
     if show_ratio:
         fig, (ax, axr, axd) = plt.subplots(
-            3, 1, sharex=True, figsize=(7, 7.2),
+            3,
+            1,
+            sharex=True,
+            figsize=(7, 7.2),
             gridspec_kw={"height_ratios": [3, 1, 1], "hspace": 0.06},
         )
     else:
@@ -398,14 +149,21 @@ def make_projection_plot(sigma_gen, gen_axes, axis, out_path, eff, gnu,
     lab = "p$_T^Z$ (ptVGen) [GeV]" if axis == "ptVGen" else axis
     ax.stairs(ds, edges, color="C3", lw=1.6, label="σ_gen(λ) (param model)")
     if s_corr is not None:
-        ax.stairs(s_corr / widths, edges, color="C0", lw=1.6, ls=(0, (4, 2)),
-                  label=corr_label)
+        ax.stairs(
+            s_corr / widths, edges, color="C0", lw=1.6, ls=(0, (4, 2)), label=corr_label
+        )
     ax.set_ylabel(r"d$\sigma_{\mathrm{gen}}$/d(" + axis + ")  [a.u.]")
     ax.margins(x=0)
     ax.legend(loc="upper right", fontsize=9)
     ax.text(
-        0.975, 0.60, _lambda_box_text(eff, gnu), transform=ax.transAxes,
-        ha="right", va="top", fontsize=7.5, family="monospace",
+        0.975,
+        0.60,
+        _lambda_box_text(eff, gnu),
+        transform=ax.transAxes,
+        ha="right",
+        va="top",
+        fontsize=7.5,
+        family="monospace",
         bbox=dict(boxstyle="round", facecolor="white", edgecolor="0.7", alpha=0.9),
     )
 
@@ -426,73 +184,131 @@ def make_projection_plot(sigma_gen, gen_axes, axis, out_path, eff, gnu,
         axd.set_xlabel(lab)
         axd.set_ylabel("(model − corr)\n/ d(" + axis + ")")
         axd.margins(x=0)
-        rng = (f"; model/corr [{rlo:.4f}, {rhi:.4f}]"
-               f"; Δ(dσ/dx) [{float(np.min(diff)):.3g}, {float(np.max(diff)):.3g}]")
+        rng = (
+            f"; model/corr [{rlo:.4f}, {rhi:.4f}]"
+            f"; Δ(dσ/dx) [{float(np.min(diff)):.3g}, {float(np.max(diff)):.3g}]"
+        )
     else:
         ax.set_xlabel(lab)
         rng = ""
 
-    out_dir = os.path.dirname(out_path)
-    if out_dir and not os.path.exists(out_dir):
-        os.makedirs(out_dir, exist_ok=True)
-    fig.savefig(out_path, dpi=130, bbox_inches="tight")
+    from wremnants.postprocessing.scetlib_np import plot_output
+
+    outdir, basename = plot_output.split_outpath(out_path)
+    plot_output.save_plot(outdir, basename, fig=fig, args=args, dpi=130)
     plt.close(fig)
-    print(f"[plot] wrote {out_path}  (axis={axis}, summed over {names[other]}{rng})")
+    print(
+        f"[plot] wrote {outdir}/{basename}.png(.pdf) + {basename}.log  "
+        f"(axis={axis}, summed over {names[other]}{rng})"
+    )
 
 
 def main(argv=None):
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    p.add_argument("--btgrid", default=BTGRID_DIR, help="SCETlib bT-grid directory")
-    p.add_argument("--datacard", default=None,
-                   help="hdf5 fallback for the GEN EDGES (no default). λ are NOT "
-                        "sourced from it — use --meta-from for that")
+    p.add_argument(
+        "--btgrid", default=_default_btgrid_dir(), help="SCETlib bT-grid directory"
+    )
+    p.add_argument(
+        "--datacard",
+        default=None,
+        help="hdf5 fallback for the GEN EDGES (no default). λ are NOT "
+        "sourced from it — use --meta-from for that",
+    )
     # λ tune: base source (optional) + functional form
-    p.add_argument("--meta-from", default=None,
-                   help="hdf5 to read the base λ tune from (datacard/fitresults metadata); optional")
-    p.add_argument("--np-model", default=None,
-                   help="F_eff functional-form override (default: the base tune's form — "
-                        "tanh_2 for the canonical / --theory-corr base)")
-    p.add_argument("--np-model-nu", default=None,
-                   help="γ_ν^NP functional-form override (default: the base tune's form)")
+    p.add_argument(
+        "--meta-from",
+        default=None,
+        help="hdf5 to read the base λ tune from (datacard/fitresults metadata); optional",
+    )
+    p.add_argument(
+        "--np-model",
+        default=None,
+        help="F_eff functional-form override (default: the base tune's form — "
+        "tanh_2 for the canonical / --theory-corr base)",
+    )
+    p.add_argument(
+        "--np-model-nu",
+        default=None,
+        help="γ_ν^NP functional-form override (default: the base tune's form)",
+    )
     # λ values to evaluate at (applied on top of the base, in this order)
-    p.add_argument("--fitresult", default=None,
-                   help="fitresults hdf5 to read the POSTFIT λ from (optional)")
-    p.add_argument("--result", default=None, help="fitresult group suffix (e.g. 'nominal')")
-    p.add_argument("--lambdas", default=None,
-                   help="λ values 'name=val,...' evaluated on top of the base tune "
-                        "(e.g. lambda2=0.5); unset params stay at the base (FranksVals "
-                        "by default), NOT 0")
+    p.add_argument(
+        "--fitresult",
+        default=None,
+        help="fitresults hdf5 to read the POSTFIT λ from (optional)",
+    )
+    p.add_argument(
+        "--result", default=None, help="fitresult group suffix (e.g. 'nominal')"
+    )
+    p.add_argument(
+        "--lambdas",
+        default=None,
+        help="λ values 'name=val,...' evaluated on top of the base tune "
+        "(e.g. lambda2=0.5); unset params stay at the base (FranksVals "
+        "by default), NOT 0",
+    )
     # gen-edge source
-    p.add_argument("--ptv-edges", default=None,
-                   help="ptVGen edges 'a,b,c,...' (default: 1-GeV bins over [0,40])")
-    p.add_argument("--absy-edges", default=None,
-                   help="absYVGen edges 'a,b,c,...' (default: single bin [0,5])")
-    p.add_argument("--gen-edges-from", default=None,
-                   help="hdf5 whose scetlib_np auxiliary gives the gen edges "
-                        "(default: --datacard, else the built-in defaults)")
+    p.add_argument(
+        "--ptv-edges",
+        default=None,
+        help="ptVGen edges 'a,b,c,...' (default: 1-GeV bins over [0,40])",
+    )
+    p.add_argument(
+        "--absy-edges",
+        default=None,
+        help="absYVGen edges 'a,b,c,...' (default: single bin [0,5])",
+    )
+    p.add_argument(
+        "--gen-edges-from",
+        default=None,
+        help="hdf5 whose scetlib_np auxiliary gives the gen edges "
+        "(default: --datacard, else the built-in defaults)",
+    )
     # TheoryCorrection overlay
-    p.add_argument("--theory-corr", default=None,
-                   help="TheoryCorrection .pkl.lz4 to overlay the official "
-                        "SCETlib+DYTurbo gen distribution (its {generator}_hist)")
-    p.add_argument("--theory-corr-proc", default=None,
-                   help="proc key in the corr file (default: the single physics key)")
-    p.add_argument("--theory-corr-var", default="pdf0",
-                   help="vars label to read from the corr hist (default pdf0 = central)")
-    p.add_argument("--theory-corr-normalize", action="store_true",
-                   help="rescale the corr curve to the model σ_gen integral "
-                        "(shape-only comparison; default off = absolute overlay)")
+    p.add_argument(
+        "--theory-corr",
+        default=None,
+        help="TheoryCorrection .pkl.lz4 to overlay the official "
+        "SCETlib+DYTurbo gen distribution (its {generator}_hist)",
+    )
+    p.add_argument(
+        "--theory-corr-proc",
+        default=None,
+        help="proc key in the corr file (default: the single physics key)",
+    )
+    p.add_argument(
+        "--theory-corr-var",
+        default="pdf0",
+        help="vars label to read from the corr hist (default pdf0 = central)",
+    )
+    p.add_argument(
+        "--theory-corr-normalize",
+        action="store_true",
+        help="rescale the corr curve to the model σ_gen integral "
+        "(shape-only comparison; default off = absolute overlay)",
+    )
     # model / output
     p.add_argument("--q-lo", type=float, default=Q_LO)
     p.add_argument("--q-hi", type=float, default=Q_HI)
-    p.add_argument("--no-nonsingular", action="store_true",
-                   help="resum-only σ_gen (σ_ns = 0; skips the FO inputs)")
-    p.add_argument("--plot", default=None,
-                   help="optional path (e.g. .png/.pdf) to write a 1-D projection plot "
-                        "of σ_gen(λ) [+ theory-corr overlay/ratio]; see --plot-axis")
-    p.add_argument("--plot-axis", default="ptVGen", choices=["ptVGen", "absYVGen"],
-                   help="gen axis to project onto for --plot (default ptVGen = ptZ)")
+    p.add_argument(
+        "--no-nonsingular",
+        action="store_true",
+        help="resum-only σ_gen (σ_ns = 0; skips the FO inputs)",
+    )
+    p.add_argument(
+        "--plot",
+        default=None,
+        help="optional path (e.g. .png/.pdf) to write a 1-D projection plot "
+        "of σ_gen(λ) [+ theory-corr overlay/ratio]; see --plot-axis",
+    )
+    p.add_argument(
+        "--plot-axis",
+        default="ptVGen",
+        choices=["ptVGen", "absYVGen"],
+        help="gen axis to project onto for --plot (default ptVGen = ptZ)",
+    )
     args = p.parse_args(argv)
 
     # ---- λ: build a PHYSICAL base tune (model CONSTRUCTED there so the
@@ -502,12 +318,24 @@ def main(argv=None):
     import copy
 
     overrides = {}
+    fit_eff_form = fit_gnu_form = None
     if args.fitresult:
+        from wremnants.postprocessing.scetlib_np import lambda_central as lc
         from wremnants.postprocessing.scetlib_np.fitresult_lambdas import _flat_values
 
+        if not args.meta_from:
+            # the fitresults carries the card λ_central metadata: construct there
+            args.meta_from = args.fitresult
         pf = _flat_values(args.fitresult, which="postfit", result=args.result)
         overrides.update(pf)
         print(f"[λ] postfit from {args.fitresult}: {pf}")
+        # Resolved FIT forms (card form, overridden by np_model_(nu_)fit if the
+        # fit carried the override) — the forms the postfit λ belong to.
+        fit_eff_form, fit_gnu_form = lc.read_np_models(args.fitresult)
+        print(
+            f"[λ] fit forms from the fitresults: "
+            f"np_model={fit_eff_form}, np_model_nu={fit_gnu_form}"
+        )
     try:
         overrides.update(parse_lambda_overrides(args.lambdas))
     except ValueError as e:
@@ -519,13 +347,24 @@ def main(argv=None):
     if args.np_model_nu:
         base["gnu_params"]["np_model_nu"] = args.np_model_nu
     eff, gnu, explicit = assemble_tune(base, overrides)
+    # EVALUATION forms: explicit --np-model(-nu) (already folded into the base) >
+    # the fit's numerator override > the base form. Construction keeps the base
+    # form (param_model's denominator/numerator split).
+    eval_np_model = args.np_model or fit_eff_form or base["eff_params"]["np_model"]
+    eval_np_model_nu = (
+        args.np_model_nu or fit_gnu_form or base["gnu_params"]["np_model_nu"]
+    )
+    eff["np_model"] = eval_np_model
+    gnu["np_model_nu"] = eval_np_model_nu
 
     gen_axes = resolve_gen_axes(args)
 
     from wremnants.postprocessing.scetlib_np.sigma_gen import SigmaGenModel
 
-    print("\n[core] constructing SigmaGenModel at the base tune (bt-grid integral) …",
-          flush=True)
+    print(
+        "\n[core] constructing SigmaGenModel at the base tune (bt-grid integral) …",
+        flush=True,
+    )
     t0 = time.time()
     core = SigmaGenModel(
         btgrid_dir=args.btgrid,
@@ -535,14 +374,18 @@ def main(argv=None):
         Q_hi=args.q_hi,
         include_nonsingular=not args.no_nonsingular,
     )
-    print(f"  constructed in {time.time()-t0:.1f}s; gen grid {core.gen_shape} "
-          f"({[n for n, _ in core.gen_axes]})")
+    print(
+        f"  constructed in {time.time()-t0:.1f}s; gen grid {core.gen_shape} "
+        f"({[n for n, _ in core.gen_axes]})"
+    )
 
     print(f"\n[λ] evaluating matched σ_gen at:")
     print(f"  F_eff  : {eff}")
     print(f"  γ_ν^NP : {gnu}")
     if explicit:
-        print(f"  (set via --lambdas/--fitresult: {explicit}; the rest stay at the base)")
+        print(
+            f"  (set via --lambdas/--fitresult: {explicit}; the rest stay at the base)"
+        )
     else:
         print("  (no overrides — evaluating at the base tune itself)")
 
@@ -551,15 +394,22 @@ def main(argv=None):
     # tune can be inspected — it can dip negative at the lowest qT).
     t0 = time.time()
     if explicit:
-        sigma_gen = np.asarray(core.sigma_gen(eff, gnu).numpy(), dtype=np.float64)
+        sigma_gen = np.asarray(
+            core.sigma_gen(
+                eff, gnu, np_model=eval_np_model, np_model_nu=eval_np_model_nu
+            ).numpy(),
+            dtype=np.float64,
+        )
     else:
         sigma_gen = np.asarray(core.sigma_gen_central.numpy(), dtype=np.float64)
     print(f"  σ_gen computed in {time.time()-t0:.1f}s; shape {sigma_gen.shape}")
 
     n_bad = int(np.sum(sigma_gen <= 0))
     if n_bad:
-        print(f"  [warning] {n_bad}/{sigma_gen.size} σ_gen bins are non-positive at "
-              f"this tune (expected where the NP damping is weak, esp. low qT).")
+        print(
+            f"  [warning] {n_bad}/{sigma_gen.size} σ_gen bins are non-positive at "
+            f"this tune (expected where the NP damping is weak, esp. low qT)."
+        )
 
     print(f"\n  Σ σ_gen        = {sigma_gen.sum():.6g}")
     print(f"  per-bin σ_gen  : min {sigma_gen.min():.4g}  max {sigma_gen.max():.4g}")
@@ -574,15 +424,23 @@ def main(argv=None):
     # np_damping_wall.NPDampingWall regularizer.
     from wremnants.postprocessing.scetlib_np import param_model_diagnostics as ppd
 
-    rep = ppd.np_physical_report(core, eff, gnu)
+    rep = ppd.np_physical_report(
+        core, eff, gnu, np_model=eval_np_model, np_model_nu=eval_np_model_nu
+    )
     damp, neg = rep["damp"], rep["neg"]
     print("\n  NP physical-validity:")
-    print(f"    γ_ν^NP damping : {'OK' if not damp['gamma_nu_wrong_sign'] else 'WRONG SIGN'}"
-          f"  (max γ_ν over probe bT = {damp['gamma_nu_max']:+.3g}; must be ≤ 0)")
-    print(f"    F_eff decays   : {'OK' if not damp['F_eff_growing'] else 'GROWING (bT-integral divergence sign)'}")
-    print(f"    native σ(qT)≥0 : neg_area_frac={neg['neg_area_frac']:.3g} "
-          f"(λ_central {rep['central_neg_area']:.3g}), min/peak={neg['min_over_peak']:+.3g}, "
-          f"n_neg_bins={neg['n_neg_bins']}")
+    print(
+        f"    γ_ν^NP damping : {'OK' if not damp['gamma_nu_wrong_sign'] else 'WRONG SIGN'}"
+        f"  (max γ_ν over probe bT = {damp['gamma_nu_max']:+.3g}; must be ≤ 0)"
+    )
+    print(
+        f"    F_eff decays   : {'OK' if not damp['F_eff_growing'] else 'GROWING (bT-integral divergence sign)'}"
+    )
+    print(
+        f"    native σ(qT)≥0 : neg_area_frac={neg['neg_area_frac']:.3g} "
+        f"(λ_central {rep['central_neg_area']:.3g}), min/peak={neg['min_over_peak']:+.3g}, "
+        f"n_neg_bins={neg['n_neg_bins']}"
+    )
 
     # WHERE the negativity sits (native Y × qT). The σ(qT)<0 dip is laundered by
     # the gen-binning, so locating it is the discriminator: negative cells inside
@@ -592,32 +450,44 @@ def main(argv=None):
     ACCEPT_ABSY = 2.5
     if neg.get("n_neg_bins") and neg.get("worst") is not None:
         w = neg["worst"]
-        print(f"    worst neg cell : σ={w['value']:.4g} ({w['frac_of_peak']*100:+.1f}% of peak) "
-              f"at Y={w['Y']:+.3g}, qT={w['qT']:.3g} GeV")
+        print(
+            f"    worst neg cell : σ={w['value']:.4g} ({w['frac_of_peak']*100:+.1f}% of peak) "
+            f"at Y={w['Y']:+.3g}, qT={w['qT']:.3g} GeV"
+        )
         cells = neg.get("neg_bins") or []
         in_cells = [c for c in cells if abs(c["Y"]) <= ACCEPT_ABSY]
         n_in, n_out = len(in_cells), len(cells) - len(in_cells)
         qr = neg.get("neg_qT_range")
-        print(f"    neg-cell split : {n_in} inside |Y|≤{ACCEPT_ABSY}, {n_out} outside "
-              f"(|Y|≤{neg.get('neg_absY_max', float('nan')):.2g} reached); "
-              f"qT∈[{qr[0]:.3g}, {qr[1]:.3g}] GeV" if qr else "")
+        print(
+            f"    neg-cell split : {n_in} inside |Y|≤{ACCEPT_ABSY}, {n_out} outside "
+            f"(|Y|≤{neg.get('neg_absY_max', float('nan')):.2g} reached); "
+            f"qT∈[{qr[0]:.3g}, {qr[1]:.3g}] GeV"
+            if qr
+            else ""
+        )
         if in_cells:
             wi = min(in_cells, key=lambda c: c["value"])
-            print(f"    worst in-acc   : σ={wi['value']:.4g} ({wi['frac_of_peak']*100:+.1f}% of peak) "
-                  f"at Y={wi['Y']:+.3g}, qT={wi['qT']:.3g} GeV   "
-                  f"[the |Y|≤{ACCEPT_ABSY} pathology the fit region could see]")
+            print(
+                f"    worst in-acc   : σ={wi['value']:.4g} ({wi['frac_of_peak']*100:+.1f}% of peak) "
+                f"at Y={wi['Y']:+.3g}, qT={wi['qT']:.3g} GeV   "
+                f"[the |Y|≤{ACCEPT_ABSY} pathology the fit region could see]"
+            )
         n_show = min(10, len(cells))
         if n_show:
             print(f"    most-negative {n_show} cells (Y, qT[GeV], σ, %peak):")
             for c in cells[:n_show]:
                 inacc = "in " if abs(c["Y"]) <= ACCEPT_ABSY else "out"
-                print(f"        [{inacc}] Y={c['Y']:+.3g}  qT={c['qT']:7.3g}  "
-                      f"σ={c['value']:+.4g}  ({c['frac_of_peak']*100:+.1f}%)")
+                print(
+                    f"        [{inacc}] Y={c['Y']:+.3g}  qT={c['qT']:7.3g}  "
+                    f"σ={c['value']:+.4g}  ({c['frac_of_peak']*100:+.1f}%)"
+                )
 
     if not rep["ok"]:
-        print("    ⚠  UNPHYSICAL NP TUNE — the differential σ(qT) is negative / the NP is "
-              "anti-damping.\n       This is hidden in the binned σ_gen above; do not treat "
-              "this point as a physical prediction.")
+        print(
+            "    ⚠  UNPHYSICAL NP TUNE — the differential σ(qT) is negative / the NP is "
+            "anti-damping.\n       This is hidden in the binned σ_gen above; do not treat "
+            "this point as a physical prediction."
+        )
 
     # ---- optional: project an official TheoryCorrection run onto the same axis.
     s_corr = None
@@ -625,7 +495,10 @@ def main(argv=None):
     if args.theory_corr:
         h_corr = load_theory_corr_hist(args.theory_corr, args.theory_corr_proc)
         s_corr = theory_corr_projection(
-            h_corr, core.gen_axes, args.plot_axis, var=args.theory_corr_var,
+            h_corr,
+            core.gen_axes,
+            args.plot_axis,
+            var=args.theory_corr_var,
             q_window=(args.q_lo, args.q_hi),
         )
         other = 1 - [n for n, _ in core.gen_axes].index(args.plot_axis)
@@ -636,13 +509,23 @@ def main(argv=None):
             scale = sum_model / sum_corr
             s_corr = s_corr * scale
             norm_label = f", ×{scale:.4f} (shape-normalized)"
-            print(f"\n[theory-corr] shape-normalized to the model integral (×{scale:.5f})")
+            print(
+                f"\n[theory-corr] shape-normalized to the model integral (×{scale:.5f})"
+            )
         corr_label = f"SCETlib+DYTurbo ({args.theory_corr_var}){norm_label}"
         rcorr = np.divide(s_model, s_corr, out=np.ones_like(s_model), where=s_corr != 0)
-        print(f"\n[theory-corr] projection onto {args.plot_axis} (var={args.theory_corr_var}):")
+        print(
+            f"\n[theory-corr] projection onto {args.plot_axis} (var={args.theory_corr_var}):"
+        )
         print(f"  Σ corr           = {sum_corr:.6g}")
-        print(f"  Σ model / Σ corr = {sum_model/sum_corr:.5f}"
-              + ("  (== 1 after --theory-corr-normalize)" if args.theory_corr_normalize else ""))
+        print(
+            f"  Σ model / Σ corr = {sum_model/sum_corr:.5f}"
+            + (
+                "  (== 1 after --theory-corr-normalize)"
+                if args.theory_corr_normalize
+                else ""
+            )
+        )
         print(f"  model / corr per bin : min {rcorr.min():.4f}  max {rcorr.max():.4f}")
         with np.printoptions(precision=4, suppress=True, linewidth=140):
             print(f"  model/corr: {rcorr}")
@@ -651,8 +534,15 @@ def main(argv=None):
 
     if args.plot:
         make_projection_plot(
-            sigma_gen, core.gen_axes, args.plot_axis, args.plot, eff, gnu,
-            s_corr=s_corr, corr_label=corr_label,
+            sigma_gen,
+            core.gen_axes,
+            args.plot_axis,
+            args.plot,
+            eff,
+            gnu,
+            s_corr=s_corr,
+            corr_label=corr_label,
+            args=args,
         )
     return 0
 

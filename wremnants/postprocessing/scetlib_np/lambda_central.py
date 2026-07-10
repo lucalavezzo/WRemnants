@@ -239,6 +239,14 @@ def read_lambda_central_from_meta(meta, proc="Z", _source="<meta>"):
     )
 
 
+def _read_meta(hdf5_path):
+    """Load the pickled ``meta`` group of a datacard / fitresults hdf5."""
+    with h5py.File(hdf5_path, "r") as f:
+        if "meta" not in f:
+            raise KeyError(f"{hdf5_path}: no 'meta' group -- wrong file type?")
+        return wums_io.pickle_load_h5py(f["meta"])
+
+
 def read_lambda_central(hdf5_path, proc="Z"):
     """Read the central lambda parameters referenced by an hdf5.
 
@@ -249,14 +257,51 @@ def read_lambda_central(hdf5_path, proc="Z"):
     Returns ``{tag, basename, eff_params, gnu_params, source}``. Raises if the
     metadata is absent.
     """
-    with h5py.File(hdf5_path, "r") as f:
-        if "meta" not in f:
-            raise KeyError(f"{hdf5_path}: no 'meta' group -- wrong file type?")
-        meta = wums_io.pickle_load_h5py(f["meta"])
-
-    lc = read_lambda_central_from_meta(meta, proc=proc, _source=hdf5_path)
+    lc = read_lambda_central_from_meta(
+        _read_meta(hdf5_path), proc=proc, _source=hdf5_path
+    )
     lc["source"] = "histmaker-metadata"
     return lc
+
+
+def read_fit_form_overrides_from_meta(meta):
+    """``(np_model_fit, np_model_nu_fit)`` from the rabbit ``--paramModel`` spec
+    stored in a fitresults' ``meta_info.args``; ``None`` per slot when the fit did
+    not override that form. A datacard (no ``meta_info.args.paramModel``) yields
+    ``(None, None)``. Keys on the literal ``np_model_(nu_)fit=`` spec tokens —
+    coupled to the ``param_model`` constructor's argument spelling."""
+    args = (meta.get("meta_info") or {}).get("args") or {}
+    specs = args.get("paramModel") or []
+    eff = gnu = None
+    for spec in specs:
+        for tok in spec:
+            tok = tok.decode() if isinstance(tok, bytes) else str(tok)
+            if tok.startswith("np_model_fit="):
+                eff = tok.split("=", 1)[1]
+            elif tok.startswith("np_model_nu_fit="):
+                gnu = tok.split("=", 1)[1]
+    return eff, gnu
+
+
+def read_np_models(hdf5_path, proc="Z"):
+    """The NP functional forms that apply to PREDICTIONS from this hdf5:
+    ``(np_model, np_model_nu)`` — the single resolver every offline tool
+    should use.
+
+    The card (denominator) forms from the propagated
+    ``scetlib_np_lambda_central`` metadata, overridden per sector by the
+    ``np_model_(nu_)fit`` numerator tokens when the file is a rabbit fitresults
+    whose ``--paramModel`` spec carried them (mirrors ``param_model``:
+    ``np_model_fit or card form``). A datacard has no fit override and resolves
+    to the card forms. Raises (KeyError) if the file carries no lambda_central
+    metadata at all (non-NP input)."""
+    meta = _read_meta(hdf5_path)
+    lc = read_lambda_central_from_meta(meta, proc=proc, _source=hdf5_path)
+    eff_fit, gnu_fit = read_fit_form_overrides_from_meta(meta)
+    return (
+        eff_fit or lc["eff_params"].get(EFF_MODEL_KEY),
+        gnu_fit or lc["gnu_params"].get(GNU_MODEL_KEY),
+    )
 
 
 if __name__ == "__main__":

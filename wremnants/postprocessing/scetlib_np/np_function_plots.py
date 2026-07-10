@@ -37,7 +37,6 @@ CLI (from a fitresults: prefit dashed, postfit solid + 68% band)::
 """
 
 import argparse
-import os
 from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
 
@@ -146,9 +145,7 @@ def _param_inset(ax, lam, sector, corner="upper right"):
         model = lam.eff.get("np_model", "?")
         active = active_params(np_model=model)
         labels, src, order = _EFF_LABELS, lam.eff, EFF_PARAMS
-    lines = [
-        rf"${labels[k]} = {src.get(k, 0):+.4f}$" for k in order if k in active
-    ]
+    lines = [rf"${labels[k]} = {src.get(k, 0):+.4f}$" for k in order if k in active]
     lines.append(rf"model: {model}")
     box = dict(boxstyle="round,pad=0.35", fc="white", ec="0.6", alpha=0.85)
     x, y, va, ha = _CORNERS[corner]
@@ -173,6 +170,7 @@ def plot_np_functions(
     outpath: str,
     inset_from: Optional[Series] = None,
     f_ymax: Optional[float] = None,
+    args=None,
 ):
     """Draw the two NP form factors for one or more λ sets.
 
@@ -275,13 +273,15 @@ def plot_np_functions(
 
     # Allow --outpath to be a directory (trailing slash or no extension): append
     # a default filename rather than erroring on a bare ".png".
-    if outpath.endswith(("/", os.sep)) or os.path.isdir(outpath) or not os.path.splitext(outpath)[1]:
-        outpath = os.path.join(outpath, "np_functions.png")
-    os.makedirs(os.path.dirname(os.path.abspath(outpath)) or ".", exist_ok=True)
+    from wremnants.postprocessing.scetlib_np import plot_output
+
     fig.tight_layout()
-    fig.savefig(outpath, dpi=140)
+    outdir, basename = plot_output.split_outpath(
+        outpath, default_name="np_functions.png"
+    )
+    plot_output.save_plot(outdir, basename, fig=fig, args=args, dpi=140)
     plt.close(fig)
-    print(f"Wrote {outpath}")
+    print(f"Wrote {outdir}/{basename}.png(.pdf) + {basename}.log")
 
 
 # ---------------------------------------------------------------------------
@@ -319,9 +319,7 @@ def make_parser():
     src.add_argument(
         "--result", default=None, help="results group suffix for --fitresult."
     )
-    src.add_argument(
-        "--n-toys", type=int, default=500, help="band toys (--fitresult)."
-    )
+    src.add_argument("--n-toys", type=int, default=500, help="band toys (--fitresult).")
     src.add_argument("--seed", type=int, default=0, help="band RNG seed.")
 
     raw = p.add_argument_group("raw λ mode (no fit)")
@@ -332,8 +330,18 @@ def make_parser():
         "λ stay at the NP-unit defaults. Names must be λ the chosen models use "
         "(lambda6/lambda6_nu need tanh_6); an inert λ is a hard error.",
     )
-    raw.add_argument("--np-model", default="tanh_2", help="F_eff model string.")
-    raw.add_argument("--np-model-nu", default="tanh_2", help="γ_ν model string.")
+    raw.add_argument(
+        "--np-model",
+        default=None,
+        help="F_eff model string (raw mode default: tanh_2; with --fitresult "
+        "the fit form is read from the fitresults, this overrides it).",
+    )
+    raw.add_argument(
+        "--np-model-nu",
+        default=None,
+        help="γ_ν model string (raw mode default: tanh_2; with --fitresult "
+        "the fit form is read from the fitresults, this overrides it).",
+    )
 
     p.add_argument(
         "--y",
@@ -368,25 +376,29 @@ def main(argv=None):
             result=args.result,
             n_toys=args.n_toys,
             seed=args.seed,
+            np_model=args.np_model,
+            np_model_nu=args.np_model_nu,
         )
     else:
+        np_model = args.np_model or "tanh_2"
+        np_model_nu = args.np_model_nu or "tanh_2"
         try:
             overrides = parse_lambda_overrides(args.lambdas)
         except ValueError as e:
             parser.error(str(e))
-        active = active_params(args.np_model, args.np_model_nu)
+        active = active_params(np_model, np_model_nu)
         inert = [k for k in overrides if k not in active]
         if inert:
             parser.error(
                 "--lambdas: "
                 + ", ".join(inert)
-                + f" not used by np_model={args.np_model} / "
-                + f"np_model_nu={args.np_model_nu} (active: "
+                + f" not used by np_model={np_model} / "
+                + f"np_model_nu={np_model_nu} (active: "
                 + ", ".join(k for k in (*EFF_PARAMS, *GNU_PARAMS) if k in active)
                 + ")"
             )
         vals = {**_DEFAULT_LAMBDAS, **overrides}
-        lam = NPLambdas.from_flat(vals, args.np_model, args.np_model_nu)
+        lam = NPLambdas.from_flat(vals, np_model, np_model_nu)
         series = [Series(label=args.label, lam=lam, color="C3")]
 
     plot_np_functions(
@@ -395,6 +407,7 @@ def main(argv=None):
         bT_max=args.bT_max,
         outpath=args.outpath,
         f_ymax=args.f_ymax,
+        args=args,
     )
 
 

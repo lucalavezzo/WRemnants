@@ -22,14 +22,19 @@ norm/N_gen are weighted yields, so they differ by an overall normalization (it
 cancels in the fit's ratio). Density plots unit-normalize both curves, so the
 comparison carries no ad-hoc scale.
 
-Entry points:
+This is a LIBRARY module (no CLI). The user-facing card agreement check is
+``python -m wremnants.postprocessing.scetlib_np.validate_agreement --reference card``,
+which calls :func:`run_card_diagnostics` here.
+
+Entry points (imported, not run):
   * :func:`run_reco_guard` — PURE-NUMPY per-bin reco check for the in-fit
-    auto-guard (warns, or raises with ``strict``; never imports plotting).
-  * :func:`run_card_diagnostics` — full reco + gen comparison (+ optional plots)
-    for interactive use; returns the per-bin residuals.
-  * ``python -m wremnants.postprocessing.scetlib_np.param_model_diagnostics
-    --datacard <card> [--outdir <dir>]`` — construct from a card, write the
-    reco + gen agreement plots.
+    auto-guard (warns, or raises with ``strict``; never imports plotting). Called
+    by the fit (``param_model.py``) at construction time, default-on.
+  * :func:`run_card_diagnostics` — full reco + gen comparison (+ optional plots);
+    the implementation behind ``validate_agreement --reference card``.
+  * the pathology detectors (:func:`np_damping_ok`, :func:`spectrum_negativity`,
+    :func:`np_physical_report`) — postfit NP-validity cross-checks, also used by
+    ``sigma_gen_at_lambda``.
 
 Heavy deps (``hist``, ``wums.plot_tools``, and the plotting/projection helpers
 from ``scetlib_np.validation_plots``) are imported LAZILY in the print/plot paths
@@ -39,13 +44,6 @@ only, so this module — and the in-fit guard — stays numpy-only.
 import os
 
 import numpy as np
-
-# Per-reco/gen axis projection order for the standalone plots (shared names).
-from wremnants.postprocessing.scetlib_np.params import (
-    GEN_AXES as GEN_PROJ_AXES,
-    RECO_AXES as RECO_PROJ_AXES,
-)
-
 
 # =============================================================================
 # Postfit NP physical-validity detectors (standalone — NOT part of the fit).
@@ -61,7 +59,15 @@ from wremnants.postprocessing.scetlib_np.params import (
 NP_PROBE_BT = (0.3, 1.0, 2.0, 5.0, 10.0, 20.0)
 
 
-def np_damping_ok(core, eff_params, gnu_params, b_probe=NP_PROBE_BT, gamma_tol=1e-3):
+def np_damping_ok(
+    core,
+    eff_params,
+    gnu_params,
+    b_probe=NP_PROBE_BT,
+    gamma_tol=1e-3,
+    np_model=None,
+    np_model_nu=None,
+):
     """Probe the NP form factors (no bT integral) for the physical DAMPING sign.
 
     Evaluates the actual ``btgrid_tf`` forms the fit integrates at a few bT:
@@ -73,15 +79,19 @@ def np_damping_ok(core, eff_params, gnu_params, b_probe=NP_PROBE_BT, gamma_tol=1
     probes test the SAME damping condition the CS walls enforce (form-agnostically
     — the b⁶ term is in the evaluated form, so this also covers tanh_6); the F_eff
     endpoint test at Y=0 is CRUDER than the wall's exact a≥0 ∀b at Y=0 and Y_max.
-    NOTE this probes the CARD form (``core.np_model``/``np_model_nu``), so it does
-    not see a numerator-form override (``np_model_(nu_)fit``). Cheap (1-D evals)."""
+    ``np_model`` / ``np_model_nu`` select the forms to probe (default: the card
+    forms ``core.np_model`` / ``core.np_model_nu``) — for a numerator-form
+    override fit (``np_model_(nu_)fit``) pass the FIT forms the λ belong to, else
+    the verdict is about the wrong form. Cheap (1-D evals)."""
     from wremnants.postprocessing.scetlib_np import btgrid_tf as fz_tf
 
     b = np.asarray(b_probe, dtype=np.float64)
     eff = {k: v for k, v in eff_params.items() if k != "np_model"}
     gnu = {k: v for k, v in gnu_params.items() if k != "np_model_nu"}
-    g = fz_tf.gamma_nu_NP_tf(b, gnu, np_model_nu=core.np_model_nu).numpy()
-    F = fz_tf.F_eff_tf(0.0, b, eff, np_model=core.np_model).numpy()
+    g = fz_tf.gamma_nu_NP_tf(
+        b, gnu, np_model_nu=np_model_nu or core.np_model_nu
+    ).numpy()
+    F = fz_tf.F_eff_tf(0.0, b, eff, np_model=np_model or core.np_model).numpy()
     gamma_max = float(np.max(g))
     feff_growing = bool(F[-1] > F[0])
     return {
@@ -95,15 +105,25 @@ def np_damping_ok(core, eff_params, gnu_params, b_probe=NP_PROBE_BT, gamma_tol=1
     }
 
 
-def spectrum_negativity(core, eff_params, gnu_params, sigma_YqT=None, locate=True):
+def spectrum_negativity(
+    core,
+    eff_params,
+    gnu_params,
+    sigma_YqT=None,
+    locate=True,
+    np_model=None,
+    np_model_nu=None,
+):
     """Negativity of the native (Y, qT) resummed spectrum at a λ point — the
     σ(qT) < 0 pathology the gen-binning averages away. Scale-free metrics:
       neg_area_frac = Σ|min(σ,0)| / Σ|σ|   (0 physical; → O(1) pathological)
       min_over_peak = min(σ) / max(σ)       (≈0 physical; ≤ −O(1) pathological)
     Pass ``sigma_YqT`` (e.g. ``core.sigma_YqT_central``) to skip recomputation,
-    else reconstructed via ``core.sigma_YqT_native``. Judge relative to the
-    λ_central baseline (``np_physical_report`` does this): the singular-only
-    spectrum carries a tiny benign qT→0 dip.
+    else reconstructed via ``core.sigma_YqT_native`` with the ``np_model`` /
+    ``np_model_nu`` forms (default: the card/construction forms — for a
+    numerator-form override fit pass the FIT forms the λ belong to). Judge
+    relative to the λ_central baseline (``np_physical_report`` does this): the
+    singular-only spectrum carries a tiny benign qT→0 dip.
 
     With ``locate`` (default True) and a 2-D spectrum on the core's native grids
     (``core.Y_unique`` × ``core.qT_unique``), also returns WHERE the negativity
@@ -114,7 +134,9 @@ def spectrum_negativity(core, eff_params, gnu_params, sigma_YqT=None, locate=Tru
       ``neg_qT_range`` / ``neg_absY_max`` extent of the negative region
     (omitted if the grids are absent or the shape doesn't match)."""
     s = (
-        core.sigma_YqT_native(eff_params, gnu_params)
+        core.sigma_YqT_native(
+            eff_params, gnu_params, np_model=np_model, np_model_nu=np_model_nu
+        )
         if sigma_YqT is None
         else sigma_YqT
     )
@@ -132,29 +154,36 @@ def spectrum_negativity(core, eff_params, gnu_params, sigma_YqT=None, locate=Tru
     if (
         locate
         and s.ndim == 2
-        and Yg is not None and qTg is not None
-        and Yg.ndim == 1 and qTg.ndim == 1
+        and Yg is not None
+        and qTg is not None
+        and Yg.ndim == 1
+        and qTg.ndim == 1
         and s.shape == (Yg.size, qTg.size)
     ):
         jmin = np.unravel_index(int(np.argmin(s)), s.shape)
         out["worst"] = dict(
-            iY=int(jmin[0]), iqT=int(jmin[1]),
-            Y=float(Yg[jmin[0]]), qT=float(qTg[jmin[1]]),
-            value=float(s[jmin]), frac_of_peak=float(s[jmin] / peak),
+            iY=int(jmin[0]),
+            iqT=int(jmin[1]),
+            Y=float(Yg[jmin[0]]),
+            qT=float(qTg[jmin[1]]),
+            value=float(s[jmin]),
+            frac_of_peak=float(s[jmin] / peak),
         )
         negidx = np.argwhere(s < 0)
         if negidx.size:
             order = np.argsort(s[negidx[:, 0], negidx[:, 1]])  # most negative first
             out["neg_bins"] = [
                 dict(
-                    Y=float(Yg[negidx[k, 0]]), qT=float(qTg[negidx[k, 1]]),
+                    Y=float(Yg[negidx[k, 0]]),
+                    qT=float(qTg[negidx[k, 1]]),
                     value=float(s[negidx[k, 0], negidx[k, 1]]),
                     frac_of_peak=float(s[negidx[k, 0], negidx[k, 1]] / peak),
                 )
                 for k in order
             ]
             out["neg_qT_range"] = (
-                float(qTg[negidx[:, 1]].min()), float(qTg[negidx[:, 1]].max())
+                float(qTg[negidx[:, 1]].min()),
+                float(qTg[negidx[:, 1]].max()),
             )
             out["neg_absY_max"] = float(np.abs(Yg[negidx[:, 0]]).max())
         else:
@@ -165,16 +194,35 @@ def spectrum_negativity(core, eff_params, gnu_params, sigma_YqT=None, locate=Tru
 
 
 def np_physical_report(
-    core, eff_params, gnu_params, sigma_YqT=None, central_neg_area=None
+    core,
+    eff_params,
+    gnu_params,
+    sigma_YqT=None,
+    central_neg_area=None,
+    np_model=None,
+    np_model_nu=None,
 ):
     """Combine both detectors into a postfit verdict (no printing, no raising).
 
     Returns ``{ok, issues, damp, neg, central_neg_area}``: ``ok`` the overall
     verdict, ``issues`` human-readable problems, ``damp``/``neg`` the raw
     sub-results. ``central_neg_area`` anchors the relative negativity threshold
-    (default: from ``core`` at λ_central). Callers format/act."""
-    damp = np_damping_ok(core, eff_params, gnu_params)
-    neg = spectrum_negativity(core, eff_params, gnu_params, sigma_YqT=sigma_YqT)
+    (default: from ``core`` at λ_central, evaluated at the CARD forms — the
+    correct baseline regardless of override). ``np_model`` / ``np_model_nu``
+    select the forms the λ point is probed under (default: the card forms; pass
+    the FIT forms for a ``np_model_(nu_)fit`` override fit, e.g. from
+    ``lambda_central.read_np_models``). Callers format/act."""
+    damp = np_damping_ok(
+        core, eff_params, gnu_params, np_model=np_model, np_model_nu=np_model_nu
+    )
+    neg = spectrum_negativity(
+        core,
+        eff_params,
+        gnu_params,
+        sigma_YqT=sigma_YqT,
+        np_model=np_model,
+        np_model_nu=np_model_nu,
+    )
     if central_neg_area is None:
         central_neg_area = spectrum_negativity(
             core,
@@ -252,9 +300,7 @@ def card_reco_reference(model, indata):
     norm = np.asarray(indata.norm, dtype=np.float64)
     n_reco = int(np.prod(model.reco_shape))
     if norm.shape[0] < n_reco:
-        raise ValueError(
-            f"indata.norm has {norm.shape[0]} bins < reco bins {n_reco}"
-        )
+        raise ValueError(f"indata.norm has {norm.shape[0]} bins < reco bins {n_reco}")
     # v1 single non-masked channel: the reco bins are the leading rows of norm.
     col = norm[:n_reco, model.signal_proc_idx]
     return col.reshape(model.reco_shape)
@@ -328,7 +374,9 @@ def run_reco_guard(
         + f")  ref_yield={d['ref_yield']:.3g}"
         for d in offenders[:max_list]
     )
-    more = "" if len(offenders) <= max_list else f"\n    … +{len(offenders)-max_list} more"
+    more = (
+        "" if len(offenders) <= max_list else f"\n    … +{len(offenders)-max_list} more"
+    )
     msg = (
         f"{tag} reco agreement: {len(offenders)} bin(s) exceed {threshold*100:.2f}% "
         f"|σ_reco(λ_c)/card_nominal − 1| (yield-weighted mean = {wmean:.3f}%). "
@@ -340,8 +388,7 @@ def run_reco_guard(
     )
     if strict:
         raise ValueError(
-            msg
-            + "\n(check_agreement_strict=1 → raising. Pass check_agreement=0 to "
+            msg + "\n(check_agreement_strict=1 → raising. Pass check_agreement=0 to "
             "disable, raise check_agreement_threshold, or set check_agreement_min_yield "
             "to ignore sparse bins.)"
         )
@@ -360,7 +407,9 @@ def compare_level(model_vals, ref_vals, axes_meta, label):
     from wremnants.postprocessing.scetlib_np.validation_plots import summarize
 
     print(f"\n{'='*70}\n{label}\n{'='*70}")
-    summarize(np.asarray(model_vals, np.float64), np.asarray(ref_vals, np.float64), axes_meta)
+    summarize(
+        np.asarray(model_vals, np.float64), np.asarray(ref_vals, np.float64), axes_meta
+    )
     resid, stats = _shape_residual(model_vals, ref_vals)
     names = [n for n, _ in axes_meta]
     shape = tuple(len(e) - 1 for _, e in axes_meta)
@@ -370,7 +419,9 @@ def compare_level(model_vals, ref_vals, axes_meta, label):
         else None
     )
     coord_str = (
-        ", ".join(f"{nm}={c}" for nm, c in zip(names, coord)) if coord is not None else "n/a"
+        ", ".join(f"{nm}={c}" for nm, c in zip(names, coord))
+        if coord is not None
+        else "n/a"
     )
     print(
         f"\n  >> {label}: yield-weighted mean|shape−1| = "
@@ -381,8 +432,13 @@ def compare_level(model_vals, ref_vals, axes_meta, label):
 
 
 def run_card_diagnostics(
-    model, indata, outdir=None, do_plots=True, ref_label_reco=None,
+    model,
+    indata,
+    outdir=None,
+    do_plots=True,
+    ref_label_reco=None,
     gen_exclude_overflow=True,
+    args=None,
 ):
     """Full reco + gen comparison of the model's λ_central shape to the card's
     references, with optional per-axis shape plots.
@@ -404,9 +460,14 @@ def run_card_diagnostics(
     binning, so there is no truncated bin to smear."""
     out = {}
     reco_ref = card_reco_reference(model, indata)
-    reco_model = np.asarray(model.sigma_reco_central, np.float64).reshape(model.reco_shape)
+    reco_model = np.asarray(model.sigma_reco_central, np.float64).reshape(
+        model.reco_shape
+    )
     out["reco"] = compare_level(
-        reco_model, reco_ref, model._reco_axes_meta, "RECO  σ_reco(λ_c) vs card norm[signal]"
+        reco_model,
+        reco_ref,
+        model._reco_axes_meta,
+        "RECO  σ_reco(λ_c) vs card norm[signal]",
     )
 
     gen_ref = card_gen_reference(model)
@@ -443,28 +504,34 @@ def run_card_diagnostics(
         rlabel_reco = ref_label_reco or "card nominal (signal)"
         h_reco_m = tf_to_hist(reco_model, model._reco_axes_meta)
         h_reco_n = tf_to_hist(reco_ref, model._reco_axes_meta)
-        for ax in RECO_PROJ_AXES:
+        # Project onto the model's own reco axes (the fit channel's — 2D or 4D),
+        # not the canonical RECO_AXES: a 2D ptll-yll fit has no angular axes.
+        for ax in [n for n, _ in model._reco_axes_meta]:
             plot_ptll_ratio(
-                h_reco_m, h_reco_n, axis=ax,
+                h_reco_m,
+                h_reco_n,
+                axis=ax,
                 out_path=os.path.join(outdir, f"reco_{ax}.png"),
-                ref_label=rlabel_reco, model_label=r"ParamModel $\sigma_{reco}(\lambda_c)$",
-                rlabel="model / card", density=True,
-                title=f"σ_reco(λ_c) vs card nominal — {ax}",
+                ref_label=rlabel_reco,
+                model_label=r"ParamModel $\sigma_{reco}(\lambda_c)$",
+                rlabel="model / card",
+                density=True,
+                args=args,
             )
         # gen ptVGen: normalize on resolved bins but keep all bins, so the
         # truncated overflow shows as a step (not a pedestal on the bulk).
-        # Pre-scale the model and pass scale=1.0 so the legend has no "(×scale)";
-        # the normalization choice lives in the title.
-        norm_tag = "resolved-qT norm" if gen_exclude_overflow else "global norm"
+        # Pre-scale the model and pass scale=1.0 so the legend has no "(×scale)".
         plot_ptll_ratio(
             tf_to_hist(gen_model * gscale, model._gen_axes_meta),
             tf_to_hist(gen_ref, model._gen_axes_meta),
-            axis="ptVGen", density=False,
+            axis="ptVGen",
+            density=False,
             out_path=os.path.join(outdir, "gen_ptVGen.png"),
             ref_label=r"card $N_{gen}$",
             model_label=r"ParamModel $\sigma_{gen}(\lambda_c)$",
-            rlabel="model / $N_{gen}$", rrange=(0.78, 1.05),
-            title=f"σ_gen(λ_c) vs card N_gen — ptVGen ({norm_tag})",
+            rlabel="model / $N_{gen}$",
+            rrange=(0.78, 1.05),
+            args=args,
         )
         # gen absYVGen: project resolved-qT only (overflow zeroed in both) so the
         # rapidity shape isn't contaminated by the truncated bin.
@@ -477,49 +544,14 @@ def run_card_diagnostics(
         plot_ptll_ratio(
             tf_to_hist(gm_res, model._gen_axes_meta),
             tf_to_hist(gn_res, model._gen_axes_meta),
-            axis="absYVGen", density=True,
+            axis="absYVGen",
+            density=True,
             out_path=os.path.join(outdir, "gen_absYVGen.png"),
             ref_label=r"card $N_{gen}$",
             model_label=r"ParamModel $\sigma_{gen}(\lambda_c)$",
-            rlabel="model / $N_{gen}$", rrange=(0.95, 1.05),
-            title="σ_gen(λ_c) vs card N_gen — |y|" + (", resolved qT" if gen_exclude_overflow else ""),
+            rlabel="model / $N_{gen}$",
+            rrange=(0.95, 1.05),
+            args=args,
         )
         print(f"\n  plots written under: {outdir}")
     return out
-
-
-def main(argv=None):
-    import argparse
-    import time
-
-    from rabbit.inputdata import FitInputData
-
-    from wremnants.postprocessing.scetlib_np.param_model import SCETlibNPParamModel
-
-    p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--datacard", required=True, help="fit-input hdf5 (must carry the scetlib_np auxiliary)")
-    p.add_argument("--btgrid", default=None, help="SCETlib bt-grid dir (default: model's data-area copy)")
-    p.add_argument("--signal-proc", default="Zmumu")
-    p.add_argument("--outdir", default=None, help="plot output dir ('' / unset to skip plotting)")
-    args = p.parse_args(argv)
-
-    print("Loading FitInputData …", flush=True)
-    t0 = time.time()
-    indata = FitInputData(args.datacard)
-    print(f"  loaded in {time.time()-t0:.1f}s; nproc={indata.nproc}", flush=True)
-
-    print("Constructing SCETlibNPParamModel (runs the bt integral at λ_central) …", flush=True)
-    t0 = time.time()
-    kw = dict(signal_proc=args.signal_proc, check_agreement=False)  # report below, not the guard
-    if args.btgrid:
-        kw["btgrid_dir"] = args.btgrid
-    model = SCETlibNPParamModel(indata, **kw)
-    print(f"  constructed in {time.time()-t0:.1f}s", flush=True)
-
-    run_card_diagnostics(
-        model, indata, outdir=(args.outdir or None), do_plots=bool(args.outdir)
-    )
-
-
-if __name__ == "__main__":
-    main()
