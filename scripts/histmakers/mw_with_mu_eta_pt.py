@@ -17,6 +17,7 @@ from wremnants.production import (
     generator_level_definitions,
     muon_calibration,
     muon_efficiencies_binned,
+    muon_efficiencies_cvh,
     muon_efficiencies_newVeto,
     muon_efficiencies_smooth,
     muon_efficiencies_veto,
@@ -1289,6 +1290,15 @@ def build_graph(df, dataset):
                 columnsForSF,
             )
             weight_expr += "*weight_fullMuonSF_withTrackingReco"
+
+            # CVH glued-module (TIB-L2 detId 369141860) efficiency hole: a
+            # data-only alignment bug -> downweight MC in the affected
+            # (eta,phi) cell. Hard-coded from a 2016G data A/B; see
+            # muon_efficiencies_cvh.hpp. Single W muon.
+            df, _ = muon_efficiencies_cvh.define_cvh_weight(
+                df, [("goodMuons_eta0", "goodMuons_phi0")]
+            )
+            weight_expr += "*weight_cvhSF"
 
             if isZ and not args.noGenMatchMC:
                 if args.scaleDYvetoFraction > 0.0:

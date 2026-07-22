@@ -15,6 +15,7 @@ import narf
 from wremnants.production import (
     muon_calibration,
     muon_efficiencies_binned,
+    muon_efficiencies_cvh,
     muon_efficiencies_smooth,
     muon_prefiring,
     muon_selections,
@@ -905,6 +906,20 @@ def build_graph(df, dataset):
                 columnsForSF,
             )
             weight_expr += "*weight_fullMuonSF_withTrackingReco"
+
+            # CVH glued-module (TIB-L2 detId 369141860) efficiency hole: a
+            # data-only alignment bug -> downweight MC in the affected
+            # (eta,phi) cell. Hard-coded from a 2016G data A/B; see
+            # muon_efficiencies_cvh.hpp. (phi read inline from the mask, as
+            # this histmaker does not define *_phi0 columns.)
+            df, _ = muon_efficiencies_cvh.define_cvh_weight(
+                df,
+                [
+                    ("trigMuons_eta0", "Muon_correctedPhi[trigMuons][0]"),
+                    ("nonTrigMuons_eta0", "Muon_correctedPhi[nonTrigMuons][0]"),
+                ],
+            )
+            weight_expr += "*weight_cvhSF"
 
         # prepare inputs for pixel multiplicity helpers
         df = df.DefinePerSample(
