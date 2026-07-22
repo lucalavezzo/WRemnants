@@ -1291,12 +1291,21 @@ def build_graph(df, dataset):
             )
             weight_expr += "*weight_fullMuonSF_withTrackingReco"
 
-            # CVH glued-module (TIB-L2 detId 369141860) efficiency hole: a
-            # data-only alignment bug -> downweight MC in the affected
-            # (eta,phi) cell. Hard-coded from a 2016G data A/B; see
-            # muon_efficiencies_cvh.hpp. Single W muon.
+            # CVH efficiency holes (badly aligned modules, incl. TIB-L2 detId
+            # 369141860): a data-only alignment effect -> downweight MC in the
+            # affected (eta,phi') cells. Measured map, see
+            # muon_efficiencies_cvh.hpp. charge/pt undo the track bending.
+            # Single W muon.
             df, _ = muon_efficiencies_cvh.define_cvh_weight(
-                df, [("goodMuons_eta0", "goodMuons_phi0")]
+                df,
+                [
+                    (
+                        "goodMuons_eta0",
+                        "goodMuons_phi0",
+                        "goodMuons_charge0",
+                        "goodMuons_pt0",
+                    )
+                ],
             )
             weight_expr += "*weight_cvhSF"
 
