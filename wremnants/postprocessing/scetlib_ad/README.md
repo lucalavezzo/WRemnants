@@ -37,7 +37,6 @@ Scripts live in `scripts/rabbit/scetlib_ad/`:
 | `prepare_cache_for_card.py` | build a cache for a card's gen binning, or an explicit `--grid-json` |
 | `make_debug_card.py` | a self-contained gen-level card built from a cache, for closure tests |
 | `compare_to_scetlib_run.py` | validate the resummed piece against a native SCETlib production run |
-| `check_differentiate_modes.py` | verify the injected derivatives against differentiating through the bridge |
 | `conf/Z_CT18Z_N3p0LL_FranksVals.conf` | runcard reproducing the current analysis central (see below) |
 
 ## Running
@@ -77,63 +76,32 @@ parameter vector, so one C++ Hessian is computed per *distinct* point rather tha
 per HVP (the minimiser takes many HVPs at fixed `x`); and the exact Hessian makes
 the minimiser converge harder, so it needs fewer iterations.
 
-## How it stays differentiable without differentiating through C++
+## How the derivatives get into TensorFlow
 
-SCETlib returns the value, the Jacobian and the exact Hessian at the current
-point, so the model never differentiates *through* the `py_function`. It
-evaluates once and injects an exact local quadratic:
+`ScetlibCachedXsecTF` is an ordinary TF-differentiable function — its backward pass
+is itself a `custom_gradient` whose own gradient contracts Hessian-vector
+products — so nested `GradientTape`s work and TF drives every C++ call. The model
+just calls it inside the graph, exactly as `examples/matched_ad/tf_gradients.py`
+does. **There is no surrogate anywhere**: autodiff differentiates the real
+prediction, and rabbit's postfit Hessian is the real Hessian.
 
-```python
-d = p - tf.stop_gradient(p)                 # value 0, unit gradient
-sigma = tf.stop_gradient(val) + J @ d + 0.5 * d @ K @ d
-```
+One requirement that imposes, and it is easy to break by accident:
 
-At the evaluation point the value is exact, the first derivative is exactly `J`
-and the second exactly `K`; everything downstream (the response fold, the ratio,
-the positivity floor) is pure TF and is differentiated analytically. Because the
-`PyFunc` sits behind `stop_gradient`, `GradientTape.jacobian` never re-enters C++
-once per fit parameter, which would otherwise cost one C++ callback per fit
-parameter per Hessian.
+> Map rabbit's fit vector into SCETlib's layout with a **constant 0/1 matrix
+> multiply**, never `tensor_scatter_nd_update`.
 
-### Why `stop_gradient`, if the point was to differentiate?
+Some mapping is unavoidable — rabbit's vector holds only the fitted parameters,
+POIs first, while SCETlib's holds every registered parameter in registry order. But
+a scatter's backward pass contains a gather, whose gradient TF represents as
+`tf.IndexedSlices`, and the bridge's second-order py_function payloads call
+`.numpy()` on the incoming cotangent and fail on it — so **everything past first
+order breaks**, while first order keeps working, which makes it a nasty way to
+fail. Isolated: a nested-tape HVP works on a bare `Variable`, and fails with a
+scatter in front even when the scatter covers the whole vector. A constant matmul
+is bit-identical (the entries are exactly 0 and 1) and free at these sizes.
 
-We *are* differentiating, exactly — the derivatives are analytic, computed by
-clad in C++ instead of by TF's autodiff, and `stop_gradient` only stops TF from
-attempting a derivative it cannot compute. `differentiate=through` selects the
-alternative — call `ScetlibCachedXsecTF` inside the graph and let TF drive the
-C++ callbacks through its nested `custom_gradient` wrappers — so the claim is
-checkable:
-
-```bash
-python scripts/rabbit/scetlib_ad/check_differentiate_modes.py \
-    --card <card>.hdf5 --conf <runcard>.conf --cache <cache>.npz
-```
-
-Measured: the two agree on the **gradient to 1.3e-16**, on HVPs to 4e-15 and on
-the **Hessian to 2.4e-17**, and a full fit driven either way returns the same
-α_s and the same uncertainties on every parameter.
-
-`through` is the **default** — the ordinary TF idiom, and the faster of the two at
-small parameter counts (15.8 s of fit time against 40.9 s on a 6-parameter
-gen-level card, identical results).
-
-`straightthrough` is kept because the two scale oppositely in the number of fit
-parameters, counting every datacard nuisance and not just ours. rabbit builds the
-postfit Hessian as `t2.jacobian(grad, self.x)`, and pfor has no converter for a
-`PyFunc`, so `through` costs one C++ HVP sweep per fit parameter (the bridge caches
-values and Jacobians, but not HVPs), while `straightthrough` pays one
-value+Jacobian and one full Hessian per distinct point regardless. With an HVP at
-~2.5× a gradient and a materialised Hessian at ~40×, the crossover is a few tens of
-parameters — so `through` for a gen-level fit, `straightthrough` if a reco card
-with hundreds of nuisances makes the postfit Hessian the bottleneck.
-
-One trap worth knowing, since it is easy to reintroduce: map rabbit's fit vector
-into SCETlib's layout with a **constant 0/1 matrix multiply**, not with
-`tensor_scatter_nd_update`. A scatter's backward pass contains a gather, whose
-gradient TF represents as `tf.IndexedSlices`, and the bridge's second-order
-py_function payloads call `.numpy()` on the incoming cotangent and fail on it. The
-matmul is bit-identical (entries are exactly 0 and 1), costs nothing at these
-sizes, and keeps the `through` path working.
+Fixing it upstream — densifying the incoming cotangent before `.numpy()` in
+`_uhvp_py` — would remove the trap rather than leave us relying on a comment.
 
 ## Validating a cache
 

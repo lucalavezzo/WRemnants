@@ -26,54 +26,24 @@ model reads ``gradient_param_names()`` and registers what it finds. Only the
 profile-scale parameters (``kappaFO``, ``kappaf``, ``muf``, the transition
 points) are outside SCETlib's autodiff and still need template nuisances.
 
-Why the derivatives are injected rather than traced
----------------------------------------------------
-SCETlib returns the value, the full Jacobian and the exact per-bin Hessian at the
-current point, all from C++. Rather than differentiating THROUGH the py_function
-boundary, we evaluate once and hand autodiff an exact local quadratic::
+How the derivatives get into TensorFlow
+--------------------------------------
+``ScetlibCachedXsecTF`` is an ordinary TF-differentiable function: its backward
+pass is itself a ``custom_gradient`` whose own gradient contracts Hessian-vector
+products, so nested ``GradientTape``s work and TF drives every C++ call. The model
+simply calls it inside the graph, exactly as
+``examples/matched_ad/tf_gradients.py`` does. There is no surrogate anywhere --
+autodiff differentiates the real prediction.
 
-    d          = p - stop_gradient(p)                 # value 0, unit gradient
-    sigma_gen  = stop_gradient(val) + J.d + 0.5 d^T K d
-
-At the evaluation point the value is exact, the first derivative is exactly J and
-the second exactly K, while everything downstream (fold, ratio, floor) stays pure
-TF and is differentiated analytically. Two practical consequences:
-
-* the ``PyFunc`` op sits behind ``stop_gradient``, so ``GradientTape.jacobian``
-  (whose pfor vectorisation has no converter for a ``PyFunc``) never re-enters
-  C++ once per fit parameter;
-* J and K come from the C++ call for free, with no ``ForwardAccumulator`` loop.
-
-``differentiate=through`` selects the alternative -- let TF drive the C++
-callbacks through the bridge's nested ``custom_gradient`` wrappers -- so this is a
-checkable claim rather than an assertion. Both paths run a full fit to the same
-answer, and agree to 1.3e-16 on the gradient, 4e-15 on HVPs and 2.4e-17 on the
-Hessian (``scripts/rabbit/scetlib_ad/check_differentiate_modes.py``).
-
-``through`` is the DEFAULT: it is the ordinary TF idiom, needs no reasoning about
-what autodiff can see, and is what the SCETlib example does. It is also FASTER at
-small parameter counts -- measured on a 6-parameter gen-level card, 15.8 s of fit
-time against 40.9 s for straightthrough.
-
-``straightthrough`` is kept because the two scale oppositely in the number of FIT
-parameters, counting every datacard nuisance and not just ours. rabbit builds the
-postfit Hessian as ``t2.jacobian(grad, self.x)``, and pfor has no converter for a
-``PyFunc``, so ``through`` costs one C++ HVP sweep per fit parameter (the bridge
-caches values and Jacobians, but not HVPs). ``straightthrough`` instead pays one
-value+Jacobian and one full Hessian per distinct parameter point, whatever the
-parameter count. Since an HVP is ~2.5x a gradient and a materialised Hessian
-~40x, the crossover is a few tens of parameters: ``through`` wins on a
-handful, ``straightthrough`` on a card carrying hundreds of nuisances.
-
-One requirement that ``through`` imposes and is easy to break: map rabbit's fit
-vector into SCETlib's layout with a CONSTANT 0/1 MATRIX MULTIPLY, never
-``tensor_scatter_nd_update``. A scatter's backward pass contains a gather, whose
+One requirement that imposes, and that is easy to break by accident: map rabbit's
+fit vector into SCETlib's layout with a CONSTANT 0/1 MATRIX MULTIPLY, never
+``tensor_scatter_nd_update``. rabbit's vector holds only the fitted parameters,
+POIs first, while SCETlib's holds every registered parameter in registry order, so
+some mapping is unavoidable. A scatter's backward pass contains a gather, whose
 gradient TF represents as ``tf.IndexedSlices``, and the bridge's second-order
-py_function payloads call ``.numpy()`` on the incoming cotangent and fail on it.
-The matmul is bit-identical (entries are exactly 0 and 1) and free at these sizes.
-
-K is always included, so the composite Hessian is exact and the fit and the
-postfit covariance are ONE rabbit job.
+py_function payloads call ``.numpy()`` on the incoming cotangent and fail on it --
+so anything past first order breaks. The matmul is bit-identical (entries are
+exactly 0 and 1) and free at these sizes (at most ~25 x 25).
 
 XLA cannot compile a ``PyFunc``, so the fit MUST run with ``--jitCompile off``.
 The model checks this at construction.
@@ -189,7 +159,6 @@ class SCETlibADParamModel(ParamModel):
         Q_hi=120.0,
         fit_params=None,
         poi_params="alphaS",
-        differentiate="through",
         threads=0,
         priors=False,
         prior_sigmas=None,
@@ -227,23 +196,6 @@ class SCETlibADParamModel(ParamModel):
         poi_params
             Subset of ``fit_params`` reported as POIs (they must come first in
             the fitter's layout). Default ``alphaS``.
-        differentiate
-            How TensorFlow gets derivatives of sigma_gen.
-
-            ``through`` (default) calls ``ScetlibCachedXsecTF`` inside the graph
-            and lets TF differentiate it, via the nested ``tf.custom_gradient``
-            wrappers that call back into C++. This is the ordinary TF idiom and
-            the same one ``examples/matched_ad/tf_gradients.py`` uses.
-
-            ``straightthrough`` instead evaluates SCETlib once per parameter point
-            and hands autodiff an exact local quadratic (see the module docstring).
-
-            Both give the same value, gradient and Hessian -- measured agreement
-            1.3e-16, 4e-15 and 2.4e-17, and a full fit either way returns the same
-            alphaS and the same uncertainties. They differ only in WHO drives the
-            C++ calls, and therefore in how the cost scales: see the module
-            docstring. Switch to ``straightthrough`` if the postfit Hessian
-            becomes the bottleneck on a card with many nuisances.
         threads
             SCETlib worker threads for the batch replay (0 = one per hardware
             thread).
@@ -277,20 +229,6 @@ class SCETlibADParamModel(ParamModel):
 
         self._response_group = str(response_group)
         self.gen_level = bool(gen_level)
-        if differentiate not in ("straightthrough", "through"):
-            raise ValueError(
-                f"differentiate must be 'straightthrough' or 'through', got "
-                f"{differentiate!r}"
-            )
-        self._through = differentiate == "through"
-        # The exact second-derivative term is always included: it is what makes
-        # the composite Hessian exact, and it lets the fit and the postfit
-        # covariance be ONE rabbit job. Dropping it (Gauss-Newton) was measured to
-        # give identical numbers on Asimov and ~5x the speed, but that is a
-        # speed/exactness trade we do not need at the binning we fit on (~1 s/bin
-        # of serial Hessian work, scaling as 1 + P(P+1)/2), so it is not offered.
-        # Reintroduce a switch here if a full-correction-grid fit ever needs it.
-        self._curvature = not self._through
 
         # ---- Backend: rebuild the calculation and load the cache.
         self.core = ScetlibADXsec(conf, cache, threads=threads)
@@ -308,7 +246,6 @@ class SCETlibADParamModel(ParamModel):
         # ---- Central: the ratio denominator, evaluated by the model itself at
         # the anchor so the ratio is exactly 1 at the start whatever the card's
         # own template looks like.
-        self._eval_cache = None
         sigma_gen_anchor = self._sigma_gen_np(self._p_base_anchor)
         self.sigma_gen_central_flat = tf.constant(sigma_gen_anchor, dtype=DTYPE)
         if self.gen_level:
@@ -350,8 +287,7 @@ class SCETlibADParamModel(ParamModel):
             f"[SCETlibADParamModel] {self.core} | {self._fold.describe()} | "
             f"{'gen-level' if self.gen_level else 'reco'} | "
             f"fitting {self.nparams} of {self.core.n_params} "
-            f"({self.npoi} POI: {[n for n in self._param_order[: self.npoi]]}) | "
-            f"differentiate={'through' if self._through else 'straightthrough'}",
+            f"({self.npoi} POI: {[n for n in self._param_order[: self.npoi]]})",
             flush=True,
         )
 
@@ -697,69 +633,13 @@ class SCETlibADParamModel(ParamModel):
         vals, _ = self.core.values_and_jacobian(p_full)
         return self._fold(np.asarray(vals, dtype=np.float64))
 
-    def _eval_np(self, fit_values):
-        """(value, J[, K]) on the gen grid, restricted to the fitted columns.
+    def _sigma_gen(self, param):
+        """sigma_gen on the gen grid, differentiable via the SCETlib bridge.
 
-        Single-entry cached on the parameter bytes: rabbit evaluates the loss and
-        the gradient through two separate ``tf.function``s at the same point, and
-        the Hessian path adds a third, so without this the C++ replay would run
-        several times per minimizer step.
-        """
-        p_fit = np.ascontiguousarray(fit_values, dtype=np.float64)
-        key = p_fit.tobytes()
-        if self._eval_cache is not None and self._eval_cache[0] == key:
-            return self._eval_cache[1]
-
-        p_full = self._full_vector(p_fit)
-        vals, jac = self.core.values_and_jacobian(p_full)
-        val = self._fold(np.asarray(vals, dtype=np.float64))
-        J = self._fold(np.asarray(jac, dtype=np.float64))[:, self._fit_idx]
-        out = (val, J)
-        if self._curvature:
-            H = self._fold(self.core.hessian(p_full))
-            K = H[:, self._fit_idx][:, :, self._fit_idx]
-            out = (val, J, np.ascontiguousarray(K))
-        self._eval_cache = (key, out)
-        return out
-
-    def _sigma_gen_straightthrough(self, param):
-        """Exact value with an exact local quadratic exposed to autodiff."""
-        n_gen = int(np.prod(self.gen_shape))
-        n_fit = self.nparams
-        p = tf.cast(param, DTYPE)
-
-        if self._curvature:
-            val, J, K = tf.py_function(
-                lambda t: self._eval_np(t.numpy()),
-                [p],
-                Tout=[DTYPE, DTYPE, DTYPE],
-            )
-            K.set_shape((n_gen, n_fit, n_fit))
-        else:
-            val, J = tf.py_function(
-                lambda t: self._eval_np(t.numpy()), [p], Tout=[DTYPE, DTYPE]
-            )
-            K = None
-        val.set_shape((n_gen,))
-        J.set_shape((n_gen, n_fit))
-
-        # d == 0 numerically, but carries a unit gradient, so the expression below
-        # reproduces (value, J, K) exactly at the evaluation point while keeping
-        # the py_function itself off the differentiated graph.
-        d = p - tf.stop_gradient(p)
-        out = tf.stop_gradient(val) + tf.linalg.matvec(tf.stop_gradient(J), d)
-        if K is not None:
-            out = out + 0.5 * tf.einsum("nij,i,j->n", tf.stop_gradient(K), d, d)
-        return out
-
-    def _sigma_gen_through(self, param):
-        """sigma_gen with the SCETlib bridge INSIDE the differentiated graph.
-
-        The reference implementation: ``ScetlibCachedXsecTF.__call__`` is an
-        ordinary TF-differentiable function (its backward pass is itself a
-        ``custom_gradient`` whose gradient contracts Hessian-vector products), so
-        nested tapes work and TF drives every C++ call itself. Kept so the
-        straight-through default is a checkable claim rather than an assertion.
+        ``ScetlibCachedXsecTF.__call__`` is an ordinary TF-differentiable function
+        -- its backward pass is itself a ``custom_gradient`` whose own gradient
+        contracts Hessian-vector products -- so nested tapes work and TF drives
+        every C++ call. Nothing here is a surrogate; autodiff sees the real thing.
         """
         p = tf.cast(param, DTYPE)
         # held = the non-fitted slots at their anchor, zero where we fit, so
@@ -774,11 +654,7 @@ class SCETlibADParamModel(ParamModel):
 
     def _ratio_from_param(self, param):
         """Per-fit-bin ratio to the anchor prediction, softly floored positive."""
-        sigma_gen = (
-            self._sigma_gen_through(param)
-            if self._through
-            else self._sigma_gen_straightthrough(param)
-        )
+        sigma_gen = self._sigma_gen(param)
         if self.gen_level:
             ratio = sigma_gen / self.sigma_gen_central_flat
         else:
@@ -834,8 +710,6 @@ class SCETlibADParamModel(ParamModel):
         for k, v in self.__dict__.items():
             if k == "core":
                 new.core = v
-            elif k == "_eval_cache":
-                new._eval_cache = None
             else:
                 new.__dict__[k] = copy.deepcopy(v, memo)
         return new
