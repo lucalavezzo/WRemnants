@@ -113,14 +113,19 @@ Measured: the two agree on the **gradient to 1.3e-16**, on HVPs to 4e-15 and on
 the **Hessian to 2.4e-17**, and a full fit driven either way returns the same
 α_s and the same uncertainties on every parameter.
 
-Straight-through is the default on **cost, not correctness**. rabbit builds the
-postfit Hessian as `t2.jacobian(grad, self.x)` over the *whole* fit vector —
-model parameters and every datacard nuisance — and pfor has no converter for a
-`PyFunc`, so `through` degrades to one C++ HVP sweep per fit parameter (the bridge
-caches values and Jacobians, but not HVPs). Straight-through pays one
-value+Jacobian and one Hessian call per distinct parameter point, independent of
-how many nuisances the card carries. On a 6-parameter debug card the two cost the
-same; on a real card with ~1000 nuisances they do not.
+`through` is the **default** — the ordinary TF idiom, and the faster of the two at
+small parameter counts (15.8 s of fit time against 40.9 s on a 6-parameter
+gen-level card, identical results).
+
+`straightthrough` is kept because the two scale oppositely in the number of fit
+parameters, counting every datacard nuisance and not just ours. rabbit builds the
+postfit Hessian as `t2.jacobian(grad, self.x)`, and pfor has no converter for a
+`PyFunc`, so `through` costs one C++ HVP sweep per fit parameter (the bridge caches
+values and Jacobians, but not HVPs), while `straightthrough` pays one
+value+Jacobian and one full Hessian per distinct point regardless. With an HVP at
+~2.5× a gradient and a materialised Hessian at ~40×, the crossover is a few tens of
+parameters — so `through` for a gen-level fit, `straightthrough` if a reco card
+with hundreds of nuisances makes the postfit Hessian the bottleneck.
 
 One trap worth knowing, since it is easy to reintroduce: map rabbit's fit vector
 into SCETlib's layout with a **constant 0/1 matrix multiply**, not with

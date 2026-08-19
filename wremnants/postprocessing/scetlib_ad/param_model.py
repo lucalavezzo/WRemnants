@@ -50,13 +50,27 @@ checkable claim rather than an assertion. Both paths run a full fit to the same
 answer, and agree to 1.3e-16 on the gradient, 4e-15 on HVPs and 2.4e-17 on the
 Hessian (``scripts/rabbit/scetlib_ad/check_differentiate_modes.py``).
 
-Straight-through remains the default on cost, not correctness: rabbit builds the
-postfit Hessian as ``t2.jacobian(grad, self.x)`` over the WHOLE fit vector, model
-parameters and every datacard nuisance alike, and pfor has no converter for a
-``PyFunc``, so ``through`` degrades to one C++ HVP sweep per fit parameter (the
-bridge caches values and Jacobians but not HVPs). Straight-through instead pays
-one value+Jacobian and one Hessian call per distinct parameter point, independent
-of how many nuisances the card carries.
+``through`` is the DEFAULT: it is the ordinary TF idiom, needs no reasoning about
+what autodiff can see, and is what the SCETlib example does. It is also FASTER at
+small parameter counts -- measured on a 6-parameter gen-level card, 15.8 s of fit
+time against 40.9 s for straightthrough.
+
+``straightthrough`` is kept because the two scale oppositely in the number of FIT
+parameters, counting every datacard nuisance and not just ours. rabbit builds the
+postfit Hessian as ``t2.jacobian(grad, self.x)``, and pfor has no converter for a
+``PyFunc``, so ``through`` costs one C++ HVP sweep per fit parameter (the bridge
+caches values and Jacobians, but not HVPs). ``straightthrough`` instead pays one
+value+Jacobian and one full Hessian per distinct parameter point, whatever the
+parameter count. Since an HVP is ~2.5x a gradient and a materialised Hessian
+~40x, the crossover is a few tens of parameters: ``through`` wins on a
+handful, ``straightthrough`` on a card carrying hundreds of nuisances.
+
+One requirement that ``through`` imposes and is easy to break: map rabbit's fit
+vector into SCETlib's layout with a CONSTANT 0/1 MATRIX MULTIPLY, never
+``tensor_scatter_nd_update``. A scatter's backward pass contains a gather, whose
+gradient TF represents as ``tf.IndexedSlices``, and the bridge's second-order
+py_function payloads call ``.numpy()`` on the incoming cotangent and fail on it.
+The matmul is bit-identical (entries are exactly 0 and 1) and free at these sizes.
 
 K is always included, so the composite Hessian is exact and the fit and the
 postfit covariance are ONE rabbit job.
@@ -175,7 +189,7 @@ class SCETlibADParamModel(ParamModel):
         Q_hi=120.0,
         fit_params=None,
         poi_params="alphaS",
-        differentiate="straightthrough",
+        differentiate="through",
         threads=0,
         priors=False,
         prior_sigmas=None,
@@ -216,18 +230,20 @@ class SCETlibADParamModel(ParamModel):
         differentiate
             How TensorFlow gets derivatives of sigma_gen.
 
-            ``straightthrough`` (default) evaluates SCETlib once per parameter
-            point and hands autodiff an exact local quadratic (see the module
-            docstring). ``through`` instead calls ``ScetlibCachedXsecTF`` inside
-            the graph and lets TF differentiate it via the nested
-            ``tf.custom_gradient`` wrappers that call back into C++.
+            ``through`` (default) calls ``ScetlibCachedXsecTF`` inside the graph
+            and lets TF differentiate it, via the nested ``tf.custom_gradient``
+            wrappers that call back into C++. This is the ordinary TF idiom and
+            the same one ``examples/matched_ad/tf_gradients.py`` uses.
 
-            Both give the same value, gradient and Hessian -- they differ only in
-            WHO drives the C++ calls. ``through`` is the honest reference and is
-            what the two modes are cross-checked against; ``straightthrough`` is
-            the default because rabbit's Hessian is a ``GradientTape.jacobian``,
-            whose pfor vectorisation has no converter for a ``PyFunc`` and so
-            falls back to one C++ callback per fit parameter.
+            ``straightthrough`` instead evaluates SCETlib once per parameter point
+            and hands autodiff an exact local quadratic (see the module docstring).
+
+            Both give the same value, gradient and Hessian -- measured agreement
+            1.3e-16, 4e-15 and 2.4e-17, and a full fit either way returns the same
+            alphaS and the same uncertainties. They differ only in WHO drives the
+            C++ calls, and therefore in how the cost scales: see the module
+            docstring. Switch to ``straightthrough`` if the postfit Hessian
+            becomes the bottleneck on a card with many nuisances.
         threads
             SCETlib worker threads for the batch replay (0 = one per hardware
             thread).
