@@ -148,19 +148,29 @@ def main():
     ourT = ourT[np.argsort(ourT[:, 0])]
     Ye = np.concatenate([ourY[:, 0], ourY[-1:, 1]])
     Te = np.concatenate([ourT[:, 0], ourT[-1:, 1]])
-    if abs(Q[0] - ourQ[0, 0]) > TOL or abs(Q[-1] - ourQ[0, 1]) > TOL:
-        raise SystemExit(
-            f"Q window differs: reference {Q[0]}..{Q[-1]} vs ours {ourQ[0]}"
-        )
-
-    vals = (
-        h[{"vars": args.var}].values()
-        if "vars" in [a.name for a in h.axes]
-        else h.values()
+    # SELECT the reference Q bin matching our window -- do not sum over Q. The
+    # production runs carry an off-peak bin (10-60) alongside 60-120, and summing
+    # them would silently compare our mass window against a wider one.
+    q_idx = next(
+        (
+            j
+            for j in range(Q.size - 1)
+            if abs(Q[j] - ourQ[0, 0]) < TOL and abs(Q[j + 1] - ourQ[0, 1]) < TOL
+        ),
+        None,
     )
-    vals = np.asarray(vals)
-    # collapse the single Q axis
-    vals = vals.sum(axis=0) if vals.ndim == 3 else vals  # (Y, qT)
+    if q_idx is None:
+        raise SystemExit(
+            f"the reference has no Q bin matching ours [{ourQ[0, 0]:g}, "
+            f"{ourQ[0, 1]:g}]; its Q edges are {list(Q)}."
+        )
+    sel = {"Q": q_idx}
+    if "vars" in [a.name for a in h.axes]:
+        sel["vars"] = args.var
+    vals = np.asarray(h[sel].values())
+    if vals.ndim != 2:
+        raise SystemExit(f"expected a (Y, qT) reference slice, got {vals.shape}")
+    print(f"   reference Q bin {q_idx} = [{Q[q_idx]:g}, {Q[q_idx + 1]:g}] selected")
 
     iy = _sum_map(Y, Ye, "Y")
     it = _sum_map(T, Te, "qT")
