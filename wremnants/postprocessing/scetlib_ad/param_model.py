@@ -46,7 +46,17 @@ TF and is differentiated analytically. Two practical consequences:
 
 ``differentiate=through`` selects the alternative -- let TF drive the C++
 callbacks through the bridge's nested ``custom_gradient`` wrappers -- so this is a
-checkable claim; see ``scripts/rabbit/scetlib_ad/check_differentiate_modes.py``.
+checkable claim rather than an assertion. Both paths run a full fit to the same
+answer, and agree to 1.3e-16 on the gradient, 4e-15 on HVPs and 2.4e-17 on the
+Hessian (``scripts/rabbit/scetlib_ad/check_differentiate_modes.py``).
+
+Straight-through remains the default on cost, not correctness: rabbit builds the
+postfit Hessian as ``t2.jacobian(grad, self.x)`` over the WHOLE fit vector, model
+parameters and every datacard nuisance alike, and pfor has no converter for a
+``PyFunc``, so ``through`` degrades to one C++ HVP sweep per fit parameter (the
+bridge caches values and Jacobians but not HVPs). Straight-through instead pays
+one value+Jacobian and one Hessian call per distinct parameter point, independent
+of how many nuisances the card carries.
 
 K is always included, so the composite Hessian is exact and the fit and the
 postfit covariance are ONE rabbit job.
@@ -467,10 +477,22 @@ class SCETlibADParamModel(ParamModel):
         self.npou = len(nou)
         self.params = np.array([p.encode() for p in self._param_order])
 
-        # Position of each fitted parameter inside SCETlib's own vector.
+        # Position of each fitted parameter inside SCETlib's own vector. rabbit's
+        # vector is NOT SCETlib's: it holds only what we fit, POIs first, while
+        # SCETlib's has every registered parameter in its registry order.
         self._fit_idx = np.array(
             [available.index(n) for n in self._param_order], dtype=np.int64
         )
+        # The map from rabbit's vector to SCETlib's, as a constant 0/1 matrix.
+        # Deliberately NOT tensor_scatter_nd_update: a scatter's backward pass
+        # contains a gather, whose gradient TF represents as tf.IndexedSlices, and
+        # the SCETlib bridge's second-order py_function payloads call .numpy() on
+        # the incoming cotangent and die on it. A matmul against a constant gives
+        # a dense gradient, so the differentiate=through path survives at second
+        # order. Bit-identical to the scatter (the entries are exactly 0 and 1)
+        # and negligible in cost: (n_scetlib, n_fit) is at most ~25 x 25.
+        self._select = np.zeros((len(available), len(self._param_order)))
+        self._select[self._fit_idx, np.arange(len(self._param_order))] = 1.0
 
         # Start values: the cache anchor, optionally shifted for injection tests.
         # _p_base_anchor is the UNSHIFTED full vector and stays the ratio
@@ -724,10 +746,13 @@ class SCETlibADParamModel(ParamModel):
         straight-through default is a checkable claim rather than an assertion.
         """
         p = tf.cast(param, DTYPE)
-        p_full = tf.tensor_scatter_nd_update(
-            tf.constant(self._p_base, dtype=DTYPE),
-            tf.constant(self._fit_idx[:, None], dtype=tf.int32),
-            p,
+        # held = the non-fitted slots at their anchor, zero where we fit, so
+        # held + S.p reconstructs the full vector. See _select on why this is a
+        # matmul and not a scatter.
+        held = self._p_base.copy()
+        held[self._fit_idx] = 0.0
+        p_full = tf.constant(held, dtype=DTYPE) + tf.linalg.matvec(
+            tf.constant(self._select, dtype=DTYPE), p
         )
         return self._fold.fold_tf(self.core.tf_fn(p_full))
 

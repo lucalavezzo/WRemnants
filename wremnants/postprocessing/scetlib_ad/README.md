@@ -109,50 +109,26 @@ python scripts/rabbit/scetlib_ad/check_differentiate_modes.py \
     --card <card>.hdf5 --conf <runcard>.conf --cache <cache>.npz
 ```
 
-Measured: the two agree on the **gradient to 1.3e-16** (bit-identical), but
-`through` **fails at second order** — both the reverse-over-reverse HVP the
-minimizer uses and the `jacobian` the covariance uses die with
-`'IndexedSlices' object has no attribute 'numpy'` at `scetlib_tf.py:117`. The
-cause is upstream and not our subsetting: a nested-tape HVP works on a bare
-parameter `Variable`, and fails as soon as *any* `tensor_scatter_nd_update` sits
-in front of the bridge — even one covering the whole vector. TF then represents
-the second-order cotangent as `IndexedSlices`, which the bridge's py_function
-payloads assume is a dense tensor. Worth reporting upstream (densifying `w`
-before `.numpy()` would fix it); note that in rabbit the model's parameters are
-always a slice of `self.x`, so this would bite any fit.
+Measured: the two agree on the **gradient to 1.3e-16**, on HVPs to 4e-15 and on
+the **Hessian to 2.4e-17**, and a full fit driven either way returns the same
+α_s and the same uncertainties on every parameter.
 
-## Caches
+Straight-through is the default on **cost, not correctness**. rabbit builds the
+postfit Hessian as `t2.jacobian(grad, self.x)` over the *whole* fit vector —
+model parameters and every datacard nuisance — and pfor has no converter for a
+`PyFunc`, so `through` degrades to one C++ HVP sweep per fit parameter (the bridge
+caches values and Jacobians, but not HVPs). Straight-through pays one
+value+Jacobian and one Hessian call per distinct parameter point, independent of
+how many nuisances the card carries. On a 6-parameter debug card the two cost the
+same; on a real card with ~1000 nuisances they do not.
 
-A cache is only valid for the bins, the parameter list and the configuration it
-was built with, and all three are checked on load. Build one per card:
-
-```bash
-python scripts/rabbit/scetlib_ad/prepare_cache_for_card.py \
-    --card <card>.hdf5 --gen-level \
-    --base-conf scripts/rabbit/scetlib_ad/conf/Z_CT18Z_N3p0LL_analysis.conf \
-    -o <cachedir> --threads 64
-python scripts/rabbit/scetlib_ad/backend_check.py --conf <cachedir>/cache.conf \
-    --cache <cachedir>/cache.npz
-```
-
-The cache does not have to share the card's bin ORDER, rapidity sign convention,
-or granularity: `GenFold` sums cache bins onto gen bins, detects whether the
-cache is signed-Y or positive-side-only, and verifies that every gen bin is
-exactly tiled. A cache that only partially covers a gen bin raises.
-
-**Use the analysis runcard, not `examples/matched_ad/matched.conf`.** The example
-runcard is plain N3LL with SCETlib's default profile scales; the analysis is
-N³⁺⁰LL (every TNP at `theta = 0` with `'level0'`) with `lambda = 0`, transition
-points `[0.2, 0.6, 1.0]`, scale floors at 1 GeV, `compensate_fo`, and
-`collins_soper4`. Measured on a 30-bin grid, that difference moves the λ response
-by 7–35% of the response itself. `conf/Z_CT18Z_N3p0LL_analysis.conf` carries the
-analysis settings, with each block's provenance in comments.
-
-Note the consequence: the analysis order is *defined* by the `[TNPs]` block, and
-a non-`off` TNP scheme is exactly what registers a TNP as a gradient parameter.
-So an analysis-faithful cache has **19** parameters, not 9. They are not fitted
-by default — pass them in `fit_params`, and then `priors=1` is required (the
-model refuses to float a TNP free).
+One trap worth knowing, since it is easy to reintroduce: map rabbit's fit vector
+into SCETlib's layout with a **constant 0/1 matrix multiply**, not with
+`tensor_scatter_nd_update`. A scatter's backward pass contains a gather, whose
+gradient TF represents as `tf.IndexedSlices`, and the bridge's second-order
+py_function payloads call `.numpy()` on the incoming cotangent and fail on it. The
+matmul is bit-identical (entries are exactly 0 and 1), costs nothing at these
+sizes, and keeps the `through` path working.
 
 ## Validating a cache
 
