@@ -75,13 +75,24 @@ def _scetlib_src():
 def configure(config_path, threads=0):
     """Rebuild the calculation the cache was prepared with.
 
-    Mirrors ``examples/matched_ad/prepare_cache.py::configure``: layer the
-    runcard on ``prod/scetlib_run/defaults.conf``, configure the calculation,
-    then apply variation 0 (central) through ``set_vary`` -- which is what
-    installs the profile-scale / b* block and the nonperturbative models.
-    Finally enable the
-    frozen-node cache on both sub-pieces, without which the rule replay has
-    nothing to replay against.
+    Follows what ``prod/scetlib_run/scetlib-run-qT.py`` does, which is the
+    path every production correction was made with: layer the runcard on
+    ``prod/scetlib_run/defaults.conf``, configure the calculation, apply the
+    card's electroweak parameters and fiducial volumes, then apply variation 0
+    (central) through ``set_vary`` -- which is what installs the profile-scale
+    / b* block and the nonperturbative models. Finally enable the frozen-node
+    cache on both sub-pieces, without which the rule replay has nothing to
+    replay against.
+
+    ``configure_ew_parameters`` and ``configure_fiducial_volumes`` are NOT
+    optional and are NOT part of ``configure_calculation``. Skipping them
+    silently keeps SCETlib's default electroweak inputs while the card
+    specifies its own -- measured as a flat **1.61%** normalization error
+    against the production driver on the analysis card, which sets
+    ``mZ = 91.1535``, ``GammaZ = 2.4932``, a custom ``alphaem``, ``sin2_thw``
+    and CKM. With them applied, ``operator()`` here reproduces
+    ``scetlib-run-qT.py`` to 1e-9. ``examples/matched_ad/prepare_cache.py``
+    upstream still omits both; do not "simplify" this back to match it.
 
     Returns ``(conf, sigma)``.
     """
@@ -93,6 +104,8 @@ def configure(config_path, threads=0):
         raise FileNotFoundError(f"scetlib_ad: cannot read runcard {config_path!r}")
 
     order, alphas, decay, scales, sigma = sl_config.configure_calculation(conf)
+    sl_config.configure_ew_parameters(conf, sigma)
+    sl_config.configure_fiducial_volumes(conf, decay)
     varis = sl_variations.configure_variations(
         conf,
         os.path.join(os.path.dirname(os.path.abspath(config_path)), "variations.conf"),
