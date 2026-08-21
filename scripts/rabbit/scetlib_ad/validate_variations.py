@@ -1,0 +1,304 @@
+#!/usr/bin/env python3
+"""Validate EVERY theory variation of the model against the old template.
+
+The central-value validations (``compare_to_scetlib_run.py``, ``validate_reco.py``)
+test one point. This tests the RESPONSE, which is what a fit actually uses: for
+each variation the theory-correction file carries, compare
+
+    model : sigma_gen(p_var) / sigma_gen(p_anchor)     -- the AD prediction
+    ref   : Corr[var]        / Corr[central]           -- the template it replaces
+
+Both sides are variation/central ratios, so no normalisation enters and the
+comparison is non-circular. A flat 1.0 means the continuous direction reproduces
+the discrete template it is meant to retire.
+
+Needs no datacard: a gen-level ratio is cache + runcard only. The reference's
+fine (absY, qT) bins are summed onto the cache's gen grid, which is exact
+because both sides are bin-integrated -- summing numerator and denominator
+separately, then dividing, which is what the fit's per-bin rnorm does.
+
+Note the two JOINT variations (muf and kappaFO together): those test the model's
+cross-term between muR and muF, which a template outer product cannot represent
+and which is a large part of why we want the continuous treatment.
+"""
+
+import argparse
+import os
+import re
+import sys
+
+import numpy as np
+
+sys.path.insert(
+    0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..")
+)
+
+from wremnants.postprocessing.scetlib_ad.xsec_backend import ScetlibADXsec  # noqa: E402
+
+# Variation label -> {SCETlib parameter: PHYSICAL value}. Absolute values, not
+# offsets. Derived from prod/scetlib_run's variations_resummed.conf; the beam
+# TNPs are 'relative' mode at +-0.5, the others 'level0' at +-1.
+VARIATIONS = {
+    "lambda2_nu0.05": {"np_gnu_lambda2": 0.05},
+    "lambda2_nu0.25": {"np_gnu_lambda2": 0.25},
+    "lambda20.0": {"np_eff_lambda2": 0.0},
+    "lambda21.0": {"np_eff_lambda2": 1.0},
+    "delta_lambda2-0.02": {"np_eff_delta_lambda2": -0.02},
+    "delta_lambda20.02": {"np_eff_delta_lambda2": 0.02},
+    "lambda40.0": {"np_eff_lambda4": 0.0},
+    "lambda41.0": {"np_eff_lambda4": 1.0},
+    # kappaFO and kappaf move together so that muF is HELD: that combination is
+    # what our single kappa_R direction represents (see the upstream commit that
+    # made the scales differentiable -- a bare kappaFO is the wrong reference).
+    "kappaFO0.5-kappaf2.": {"scale_kappa_R": 0.5},
+    "kappaFO2.-kappaf0.5": {"scale_kappa_R": 2.0},
+    # muf up/down is a full factor of 2 (Scale_provider.cpp: pow(2., _vary.muf),
+    # enum up=+1 / down=-1). NB it also rescales muf_min, while our direction
+    # comes from members built at kappa_F = 0.5/2.0 -- whether those agree
+    # exactly is part of what this test measures.
+    "mufdown": {"scale_kappa_F": 0.5},
+    "mufup": {"scale_kappa_F": 2.0},
+    "mufdown-kappaFO0.5-kappaf2.": {"scale_kappa_F": 0.5, "scale_kappa_R": 0.5},
+    "mufup-kappaFO2.-kappaf0.5": {"scale_kappa_F": 2.0, "scale_kappa_R": 2.0},
+    "transition_points0.2_0.35_1.0": {"scale_x2": 0.35},
+    "transition_points0.2_0.75_1.0": {"scale_x2": 0.75},
+    # old central values, a cross-check variation rather than an uncertainty --
+    # and the only one that needs x1/x3, which are frozen in the fit by default.
+    "transition_points0.3_0.6_0.9": {"scale_x1": 0.3, "scale_x3": 0.9},
+}
+for _t in ("gamma_cusp", "gamma_mu_q", "gamma_nu", "h_qqV", "s"):
+    for _v in (-1.0, 1.0):
+        VARIATIONS[f"{_t}{_v:g}."] = {f"tnp_{_t}": _v}
+for _t in ("b_qqV", "b_qqbarV", "b_qqS", "b_qqDS", "b_qg"):
+    for _v in (-0.5, 0.5):
+        VARIATIONS[f"{_t}{_v:g}"] = {f"tnp_{_t}": _v}
+
+CORR_HIST_SUFFIX = "_hist"
+CENTRAL = "central"
+
+
+def load_corr(path):
+    """The theory-correction sigma hist (Q, absY, qT, charge, vars)."""
+    import pickle
+
+    import lz4.frame
+
+    with lz4.frame.open(path, "rb") as f:
+        d = pickle.load(f)
+    boson = next(k for k in d if k in ("Z", "W", "Wplus", "Wminus"))
+    inner = d[boson]
+    key = next(k for k in inner if k.endswith(CORR_HIST_SUFFIX) and "minnlo" not in k)
+    print(f"reference: {boson} / {key}")
+    return inner[key]
+
+
+def merge_matrix(fine, coarse, name, tol=1e-9):
+    """(n_coarse, n_fine) 0/1 matrix summing fine bins into coarse ones."""
+    fine = np.asarray(fine, float)
+    coarse = np.asarray(coarse, float)
+    M = np.zeros((coarse.size - 1, fine.size - 1))
+    for k in range(coarse.size - 1):
+        lo, hi = coarse[k], coarse[k + 1]
+        idx = [
+            i
+            for i in range(fine.size - 1)
+            if fine[i] >= lo - tol and fine[i + 1] <= hi + tol
+        ]
+        if not idx:
+            raise SystemExit(f"{name}: no reference bins inside [{lo}, {hi}]")
+        if abs(fine[idx[0]] - lo) > tol or abs(fine[idx[-1] + 1] - hi) > tol:
+            raise SystemExit(
+                f"{name}: coarse edges [{lo}, {hi}] are not reference edges; "
+                f"the model grid must be a sub-binning of the correction's."
+            )
+        M[k, idx] = 1.0
+    return M
+
+
+def plot_response(label, Te, r_model, r_ref, outdir, meta):
+    """Model vs template RESPONSE on one variation, |Y| integrated.
+
+    Both curves are variation/central ratios. Y is integrated by summing sigma
+    over |Y| for numerator and denominator SEPARATELY and then dividing -- not by
+    averaging per-bin ratios, which would weight the low-yield forward bins the
+    same as the peak.
+    """
+    import hist
+
+    from wums import output_tools, plot_tools
+
+    os.makedirs(outdir, exist_ok=True)
+
+    def h1(v):
+        h = hist.Hist(
+            hist.axis.Variable(Te, name="qT", overflow=False, underflow=False),
+            storage=hist.storage.Double(),
+        )
+        h.view(flow=False)[...] = v
+        return h
+
+    # Both curves are ratios, so centre the top panel on 1 rather than letting
+    # matplotlib pick an offset range -- an off-centre axis makes a symmetric
+    # response look like a trend. The floor keeps a near-null variation (e.g.
+    # b_qqDS, which is identically 1) from getting a degenerate range.
+    dev = max(
+        float(np.max(np.abs(np.asarray(r_ref, float) - 1.0))),
+        float(np.max(np.abs(np.asarray(r_model, float) - 1.0))),
+    )
+    pad = max(1.2 * dev, 2.0e-3)
+    fig = plot_tools.makePlotWithRatioToRef(
+        [h1(r_ref), h1(r_model)],
+        labels=[f"template  {label}", f"model  {label}"],
+        ylim=[1.0 - pad, 1.0 + pad],
+        # mplhep loc: 0 = above the axes, 2 = top-left INSIDE the box (default).
+        logoPos=0,
+        colors=["#5790fc", "#e42536"],
+        linestyles=["solid", "dashed"],
+        xlabel=r"boson $q_\mathrm{T}$ (GeV)",
+        ylabel=r"$\sigma_\mathrm{var}/\sigma_\mathrm{central}$",
+        rlabel=["model / template"],
+        rrange=[[0.995, 1.005]],
+        binwnorm=None,
+        logy=False,
+        yerr=False,
+        nlegcols=1,
+        cms_label="Work in progress",
+        grid=True,
+    )
+    safe = re.sub(r"[^A-Za-z0-9]+", "_", label).strip("_")
+    plot_tools.save_pdf_and_png(outdir, f"var_{safe}", fig=fig)
+    output_tools.write_index_and_log(
+        outdir, f"var_{safe}", analysis_meta_info=meta, args=None
+    )
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    ap.add_argument("--corr", required=True, help="scetlib_dyturbo_*_Corr<B>.pkl.lz4")
+    ap.add_argument("--cache", required=True)
+    ap.add_argument("--conf", required=True)
+    ap.add_argument("--threads", type=int, default=32)
+    ap.add_argument(
+        "--only", nargs="*", default=None, help="restrict to these variation labels"
+    )
+    ap.add_argument("--plot-dir", default=None)
+    args = ap.parse_args()
+
+    core = ScetlibADXsec(args.conf, args.cache, threads=args.threads)
+    names = list(core.param_names)
+    print(f"cache: {core.n_bins} bins, {core.n_params} params")
+
+    h = load_corr(args.corr)
+    ax = {a.name: a for a in h.axes}
+    labels = [str(x) for x in ax["vars"]]
+    # bin-integrated sigma on (absY, qT) for one Q and one charge bin
+    vals = np.asarray(h.values(flow=False))
+    dims = [a.name for a in h.axes]
+    iQ, ich = dims.index("Q"), dims.index("charge")
+    if vals.shape[iQ] != 1 or vals.shape[ich] != 1:
+        raise SystemExit("expected a single Q and charge bin in the correction")
+    vals = np.squeeze(vals, axis=(iQ, ich))  # (absY, qT, vars) order-dependent
+    order = [d for d in dims if d not in ("Q", "charge")]
+    vals = np.moveaxis(
+        vals, [order.index("absY"), order.index("qT"), order.index("vars")], [0, 1, 2]
+    )
+
+    # the cache's gen grid, from the bins themselves
+    b = core.bins
+    yl = np.unique(np.round(b[:, 2:4], 12), axis=0)
+    tl = np.unique(np.round(b[:, 4:6], 12), axis=0)
+    yl, tl = yl[np.argsort(yl[:, 0])], tl[np.argsort(tl[:, 0])]
+    Ye = np.concatenate([yl[:, 0], yl[-1:, 1]])
+    Te = np.concatenate([tl[:, 0], tl[-1:, 1]])
+    print(
+        f"model grid: |Y| {Ye.size-1} bins [{Ye[0]:g}, {Ye[-1]:g}], "
+        f"qT {Te.size-1} bins [{Te[0]:g}, {Te[-1]:g}]"
+    )
+    MY = merge_matrix(ax["absY"].edges, Ye, "absY")
+    MT = merge_matrix(ax["qT"].edges, Te, "qT")
+
+    def ref_on_grid(label):
+        v = vals[:, :, labels.index(label)]
+        return MY @ v @ MT.T  # (nY, nT)
+
+    # GenFold indexes in the order the gen axes are GIVEN, and the cache was
+    # built from the card as (ptVGen, absYVGen) -- gen shape (21, 10). Passing
+    # them Y-first makes it read the Y edges as qT and reject the cache.
+    fold = core.fold_for([("ptVGen", Te), ("absYVGen", Ye)], b[0, 0], b[0, 1])
+    anchor = core.anchor.copy()
+
+    def model_on_grid(overrides):
+        p = anchor.copy()
+        for k, val in overrides.items():
+            if k not in names:
+                return None
+            p[names.index(k)] = val
+        vals_, _ = core.values_and_jacobian(p)
+        # fold -> (ptVGen, absYVGen); transpose to the (|Y|, qT) convention the
+        # reference side uses.
+        return fold(np.asarray(vals_, float)).reshape(Te.size - 1, Ye.size - 1).T
+
+    s_cen = model_on_grid({})
+    r_cen = ref_on_grid(CENTRAL)
+
+    todo = [L for L in labels if L != CENTRAL and (args.only is None or L in args.only)]
+    print(
+        f"\n{'variation':<32} {'max|dev|':>10} {'mean|dev|':>10} "
+        f"{'model rng':>18} {'ref rng':>18}"
+    )
+    rows, skipped = [], []
+    for L in todo:
+        ov = VARIATIONS.get(L)
+        if ov is None:
+            skipped.append((L, "no mapping"))
+            continue
+        s_var = model_on_grid(ov)
+        if s_var is None:
+            skipped.append((L, f"cache lacks {list(ov)}"))
+            continue
+        rm = s_var / s_cen
+        rr = ref_on_grid(L) / r_cen
+        good = np.isfinite(rm) & np.isfinite(rr) & (rr != 0)
+        dev = np.abs(rm[good] / rr[good] - 1.0)
+        rows.append((L, float(dev.max()), float(dev.mean())))
+        print(
+            f"{L:<32} {dev.max():10.2e} {dev.mean():10.2e} "
+            f"[{rm[good].min():.4f},{rm[good].max():.4f}] "
+            f"[{rr[good].min():.4f},{rr[good].max():.4f}]"
+        )
+        if args.plot_dir:
+            # Y-integrated response: sum sigma over |Y| first, then divide.
+            rm1 = s_var.sum(axis=0) / s_cen.sum(axis=0)
+            rr1 = ref_on_grid(L).sum(axis=0) / r_cen.sum(axis=0)
+            plot_response(
+                L,
+                Te,
+                rm1,
+                rr1,
+                args.plot_dir,
+                {
+                    "variation": L,
+                    "model setting": str(ov),
+                    "reference": os.path.basename(args.corr),
+                    "cache": os.path.basename(args.cache),
+                    "both curves": "variation / central (a RESPONSE, not a xsec)",
+                    "max|model/template - 1| (all bins)": f"{dev.max():.3e}",
+                    "mean|.| (all bins)": f"{dev.mean():.3e}",
+                },
+            )
+    if skipped:
+        print("\nskipped:")
+        for L, why in skipped:
+            print(f"   {L:<32} {why}")
+    if rows:
+        worst = max(rows, key=lambda r: r[1])
+        print(
+            f"\n{len(rows)} variations compared; worst max|dev| = "
+            f"{worst[1]:.2e} ({worst[0]})"
+        )
+
+
+if __name__ == "__main__":
+    main()
