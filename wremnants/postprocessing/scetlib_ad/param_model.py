@@ -50,6 +50,7 @@ The model checks this at construction.
 """
 
 import copy
+import re
 
 import numpy as np
 import tensorflow as tf
@@ -73,17 +74,40 @@ DTYPE = tf.float64
 # Checked case-insensitively against indata.systs; only the entries whose model
 # parameter is actually fitted are enforced, so a lambda-only run still tolerates
 # a card carrying pdfAlphaS.
+# Regex (matched case-insensitively against indata.systs) -> the registered
+# parameter that makes a card syst a double count. Only the entries whose model
+# parameter is actually FITTED are enforced, so a lambda-only run still tolerates
+# a card carrying pdfAlphaS.
+#
+# Regex, not substring: the PDF eigenvector templates are pdf<N><SET>Sym{Avg,Diff}
+# and must be told apart from pdfAlphaS, which is a different physics direction
+# living in a different model parameter.
 _CONFLICTS = (
     (
-        "scetlibnp",
+        r"scetlibnp",
         "any NP lambda",
         lambda names: any(n.startswith("lambda") for n in names),
     ),
-    ("pdfalphas", "alphaS", lambda names: "alphaS" in names),
+    (r"^pdfalphas", "alphaS", lambda names: "alphaS" in names),
     (
-        "resumtnp",
+        r"^resumtnp",
         "a resummation TNP",
         lambda names: any(n.startswith(adp.TNP_PREFIX_OUT) for n in names),
+    ),
+    (
+        r"^pdf\d+",
+        "a PDF eigenvector coefficient",
+        lambda names: any(n.startswith(adp.PDF_PREFIX_OUT) for n in names),
+    ),
+    (
+        r"^resumfoscale",
+        "the muR / muF profile scales",
+        lambda names: any(n in ("resumScaleMuR", "resumScaleMuF") for n in names),
+    ),
+    (
+        r"^resumtransition",
+        "a matching transition point",
+        lambda names: any(n.startswith("resumTransition") for n in names),
     ),
 )
 
@@ -403,11 +427,17 @@ class SCETlibADParamModel(ParamModel):
         # N^{3+0}LL prescription), and silently floating ten unconstrained theory
         # nuisances is not what "fit the NP model" should mean. Ask for them
         # explicitly via fit_params, with priors.
-        requested = _as_name_tuple(fit_params) or tuple(
-            n
-            for n in available
-            if n not in adp.DEFAULT_FROZEN and not n.startswith(adp.TNP_PREFIX_OUT)
-        )
+        # 'all' = every registered direction except the frozen shape constants,
+        # i.e. hand the whole SCETlib theory uncertainty to the model. That
+        # includes the TNPs, so priors are required (see the check below).
+        if _as_name_tuple(fit_params) == ("all",):
+            requested = tuple(n for n in available if n not in adp.DEFAULT_FROZEN)
+        else:
+            requested = _as_name_tuple(fit_params) or tuple(
+                n
+                for n in available
+                if n not in adp.DEFAULT_FROZEN and not n.startswith(adp.TNP_PREFIX_OUT)
+            )
         unknown = [n for n in requested if n not in available]
         if unknown:
             raise ValueError(
@@ -446,6 +476,34 @@ class SCETlibADParamModel(ParamModel):
         self._select = np.zeros((len(available), len(self._param_order)))
         self._select[self._fit_idx, np.arange(len(self._param_order))] = 1.0
 
+        # Reparametrisation (see params.REPARAM): for the profile scales the
+        # FITTED parameter is a unit nuisance theta and the PHYSICAL value handed
+        # to SCETlib is a function of it. Stored as coefficient vectors so one
+        # vectorised expression covers every parameter, identity included, and
+        # the TF path stays a handful of elementwise ops with exact derivatives.
+        n_fit = len(self._param_order)
+        self._rp_log = np.zeros(n_fit, dtype=bool)
+        self._rp_quad = np.zeros(n_fit, dtype=bool)
+        self._rp_L = np.zeros(n_fit)
+        self._rp_c = np.zeros((3, n_fit))
+        for i, name in enumerate(self._param_order):
+            spec = adp.reparam(name)
+            if spec is None:
+                continue
+            kind, coeffs = spec
+            if kind == "log":
+                self._rp_log[i] = True
+                (self._rp_L[i],) = coeffs
+            elif kind == "quad":
+                self._rp_quad[i] = True
+                self._rp_c[:, i] = coeffs
+            else:
+                raise ValueError(f"params.REPARAM: unknown kind {kind!r}")
+        self._rp_id = ~(self._rp_log | self._rp_quad)
+        self._reparametrised = tuple(
+            n for n, f in zip(self._param_order, ~self._rp_id) if f
+        )
+
         # Start values: the cache anchor, optionally shifted for injection tests.
         # _p_base_anchor is the UNSHIFTED full vector and stays the ratio
         # denominator; _p_base carries the shift for the non-fitted slots only
@@ -453,6 +511,24 @@ class SCETlibADParamModel(ParamModel):
         self._p_base_anchor = self._anchor.copy()
         self._p_base = self._anchor.copy()
         defaults = self._anchor[self._fit_idx].copy()
+        # A reparametrised parameter starts at theta = 0, NOT at its physical
+        # anchor. The check below is what guarantees theta = 0 maps back onto the
+        # anchor, so the ratio-to-central is exactly 1 at the start; a mistyped
+        # coefficient would otherwise shift the whole prediction silently.
+        defaults[~self._rp_id] = 0.0
+        round_trip = self._physical(defaults)
+        if not np.allclose(round_trip, self._anchor[self._fit_idx], rtol=0, atol=1e-12):
+            bad = [
+                (n, float(a), float(b))
+                for n, a, b in zip(
+                    self._param_order, round_trip, self._anchor[self._fit_idx]
+                )
+                if abs(a - b) > 1e-12
+            ]
+            raise ValueError(
+                "scetlib_ad: the REPARAM maps do not reproduce the cache anchor "
+                f"at theta = 0, so sigma_gen/sigma_central would not be 1: {bad}"
+            )
         for name, val in _parse_kv(xparam_default).items():
             if name not in available:
                 raise KeyError(f"xparam_default: unknown parameter {name!r}")
@@ -466,6 +542,13 @@ class SCETlibADParamModel(ParamModel):
                     f"to a NON-fitted parameter; it is pinned there, not floated.",
                     flush=True,
                 )
+        if xparam_default and self._reparametrised:
+            print(
+                "[SCETlibADParamModel] NB xparam_default for "
+                f"{list(self._reparametrised)} is in THETA units (unit nuisance), "
+                "not physical units.",
+                flush=True,
+            )
         if xparam_default:
             print(
                 "[SCETlibADParamModel] start shifted: "
@@ -604,16 +687,17 @@ class SCETlibADParamModel(ParamModel):
             return
         names = [s.decode() if isinstance(s, bytes) else str(s) for s in systs]
         lowered = [(s, s.lower()) for s in names]
-        for substring, what, applies in _CONFLICTS:
+        for pattern, what, applies in _CONFLICTS:
             if not applies(self._param_order):
                 continue
-            clash = [s for s, low in lowered if substring in low]
+            rx = re.compile(pattern)
+            clash = [s for s, low in lowered if rx.search(low)]
             if clash:
                 raise ValueError(
                     f"[SCETlibADParamModel] {len(clash)} card syst(s) matching "
-                    f"{substring!r} describe the same physics as the fitted "
+                    f"{pattern!r} describe the same physics as the fitted "
                     f"{what}; running both double-counts. Remake the datacard "
-                    f"with setupRabbit --excludeNuisances '.*{substring}.*' "
+                    f"with setupRabbit --excludeNuisances '{pattern}' "
                     f"(case as in the card). Conflicting systs:\n"
                     + "\n".join(f"    {s}" for s in clash[:20])
                 )
@@ -622,10 +706,43 @@ class SCETlibADParamModel(ParamModel):
     # evaluation
     # =========================================================================
 
+    def _physical(self, theta):
+        """Fit values -> the PHYSICAL values SCETlib expects (numpy).
+
+        Identity for everything except the reparametrised profile scales; see
+        params.REPARAM for why those are unit nuisances.
+        """
+        t = np.asarray(theta, dtype=np.float64)
+        return (
+            np.where(self._rp_id, t, 0.0)
+            + np.where(self._rp_log, np.exp(t * self._rp_L), 0.0)
+            + np.where(
+                self._rp_quad,
+                self._rp_c[0] + self._rp_c[1] * t + self._rp_c[2] * t * t,
+                0.0,
+            )
+        )
+
+    def _physical_tf(self, theta):
+        """:meth:`_physical` in TensorFlow, so the map is differentiated too.
+
+        The chain rule does the rest: TF differentiates the map, SCETlib supplies
+        d(sigma)/d(physical), and the composite gradient and Hessian stay exact.
+        """
+        t = tf.cast(theta, DTYPE)
+        c = tf.constant(self._rp_c, dtype=DTYPE)
+        return (
+            tf.constant(self._rp_id.astype(np.float64), dtype=DTYPE) * t
+            + tf.constant(self._rp_log.astype(np.float64), dtype=DTYPE)
+            * tf.exp(t * tf.constant(self._rp_L, dtype=DTYPE))
+            + tf.constant(self._rp_quad.astype(np.float64), dtype=DTYPE)
+            * (c[0] + c[1] * t + c[2] * t * t)
+        )
+
     def _full_vector(self, fit_values):
         """Fitted values -> the complete SCETlib parameter vector."""
         p = self._p_base.copy()
-        p[self._fit_idx] = np.asarray(fit_values, dtype=np.float64)
+        p[self._fit_idx] = self._physical(fit_values)
         return p
 
     def _sigma_gen_np(self, p_full):
@@ -641,7 +758,7 @@ class SCETlibADParamModel(ParamModel):
         contracts Hessian-vector products -- so nested tapes work and TF drives
         every C++ call. Nothing here is a surrogate; autodiff sees the real thing.
         """
-        p = tf.cast(param, DTYPE)
+        p = self._physical_tf(param)
         # held = the non-fitted slots at their anchor, zero where we fit, so
         # held + S.p reconstructs the full vector. See _select on why this is a
         # matmul and not a scatter.

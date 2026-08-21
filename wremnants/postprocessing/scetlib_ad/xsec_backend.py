@@ -72,7 +72,7 @@ def _scetlib_src():
     )
 
 
-def configure(config_path, threads=0):
+def configure(config_path, threads=0, diff_scales=True, fo_resolve_muR=True):
     """Rebuild the calculation the cache was prepared with.
 
     Follows what ``prod/scetlib_run/scetlib-run-qT.py`` does, which is the
@@ -94,6 +94,20 @@ def configure(config_path, threads=0):
     ``scetlib-run-qT.py`` to 1e-9. ``examples/matched_ad/prepare_cache.py``
     upstream still omits both; do not "simplify" this back to match it.
 
+    ``diff_scales`` registers muR and the three matching transition points as
+    differentiable parameters (``scale_kappa_R``, ``scale_x1..x3``, plus an inert
+    ``scale_kappa_F`` slot that ``build_pdf_variations`` ties the muF pair to).
+    It REQUIRES ``muf_follows_muB = no``: with muf tied to muB a live kappa_R
+    moves muF while the beam convolutions stay frozen at their own muF. It also
+    changes the parameter registry, so a cache built without it cannot be loaded
+    with it -- :class:`ScetlibADXsec` therefore reads the flag off the cache
+    rather than assuming.
+
+    ``fo_resolve_muR`` resolves the fixed-order muR dependence into the frozen
+    grid so the FO piece follows kappa_R in closed form. It must be set BEFORE
+    the grid is built -- enabling it afterwards invalidates the cache -- and it
+    samples several scales, so the warm costs roughly 3x.
+
     Returns ``(conf, sigma)``.
     """
     sl_config, sl_variations, _ = _import_scetlib()
@@ -106,6 +120,19 @@ def configure(config_path, threads=0):
     order, alphas, decay, scales, sigma = sl_config.configure_calculation(conf)
     sl_config.configure_ew_parameters(conf, sigma)
     sl_config.configure_fiducial_volumes(conf, decay)
+    if diff_scales:
+        follows = conf["Calculation_settings"].get("muf_follows_muB", "no")
+        if str(follows).strip().lower() in ("yes", "true", "1"):
+            raise ValueError(
+                "scetlib_ad: diff_scales needs muf_follows_muB = no, but the "
+                f"runcard sets muf_follows_muB = {follows}. With muf tied to muB "
+                "a live kappa_R moves muF while the beam convolutions stay "
+                "frozen at their own muF."
+            )
+        sigma.set_diff_scales(1)
+    if fo_resolve_muR:
+        for piece in sigma.sub_pieces():
+            piece.set_fo_resolve_muR(True)
     varis = sl_variations.configure_variations(
         conf,
         os.path.join(os.path.dirname(os.path.abspath(config_path)), "variations.conf"),
@@ -300,11 +327,40 @@ class ScetlibADXsec:
         Worker threads for the batch replay (0 = one per hardware thread).
     """
 
+    @staticmethod
+    def cache_param_names(cache_path):
+        """The parameter names a cache was built with, without loading it.
+
+        ``.npz`` is a zip of individual arrays, so this reads only ``names``.
+        Used to configure the calculation the way the cache expects instead of
+        the way we would prefer -- a mismatch is otherwise a hard load failure
+        (the fingerprint hashes the names in order).
+        """
+        with np.load(cache_path, allow_pickle=False) as z:
+            if "names" not in z.files:
+                return None
+            return [str(n) for n in z["names"]]
+
     def __init__(self, conf_path, cache_path, threads=0):
         _, _, ScetlibCachedXsecTF = _import_scetlib()
         self.conf_path = os.path.abspath(conf_path)
         self.cache_path = os.path.abspath(cache_path)
-        self.conf, self._sigma = configure(self.conf_path, threads)
+        # Match the cache's direction set: caches built before the scale
+        # directions existed have no scale_* entries, and configuring them in
+        # would change the registry and fail the fingerprint check.
+        cached_names = self.cache_param_names(self.cache_path)
+        want_scales = cached_names is None or any(
+            n.startswith("scale_") for n in cached_names
+        )
+        # fo_resolve_muR likewise has to match: it changes the frozen FO grid,
+        # and the docs are explicit that enabling it after the grid was built
+        # invalidates the cache. Both travel together with the scale directions.
+        self.conf, self._sigma = configure(
+            self.conf_path,
+            threads,
+            diff_scales=want_scales,
+            fo_resolve_muR=want_scales,
+        )
         sing, nons = self._sigma.sub_pieces()
         self._fn = ScetlibCachedXsecTF.load(self.cache_path, sing, nons)
 

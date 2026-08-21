@@ -40,6 +40,7 @@ from wremnants.postprocessing.scetlib_ad.response import (  # noqa: E402
     DEFAULT_RESPONSE_GROUP,
 )
 from wremnants.postprocessing.scetlib_ad.xsec_backend import (  # noqa: E402
+    _scetlib_src,
     bins_from_gen_axes,
     configure,
 )
@@ -83,6 +84,119 @@ def gen_axes_from_card(path, gen_level):
         b = aux[DEFAULT_RESPONSE_GROUP]
         names = [n.decode() if isinstance(n, bytes) else str(n) for n in b["gen_axes"]]
         return [(n, np.asarray(b[f"edges__{n}"], dtype=np.float64)) for n in names]
+
+
+def _upstream_prepare_cache():
+    """The upstream example module, for its PDF-variation helpers.
+
+    ``alphas_of`` / ``find_alphas_pair`` / ``pdf_set_size`` /
+    ``ensure_beamfunc_grids`` are non-trivial (the last one fans out one
+    single-threaded ~3.5 min process per PDF member and works around a shared
+    .info race), and they live in the SCETlib checkout we already depend on.
+    Loading them by path keeps one implementation, so an upstream fix arrives
+    for free -- importing is safe because its ``main()`` is guarded.
+    """
+    import importlib.util
+
+    path = os.path.join(_scetlib_src(), "examples", "matched_ad", "prepare_cache.py")
+    if not os.path.exists(path):
+        raise SystemExit(
+            f"scetlib_ad: cannot find {path}, needed for the PDF/alphaS/muF "
+            f"variation helpers. Pass --no-pdf to build a physics-only cache."
+        )
+    spec = importlib.util.spec_from_file_location("_scetlib_prepare_cache", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def build_variations(sing, nons, bins, p0, names, conf, args):
+    """PDF eigenvector + alphaS-pair + muF variation members.
+
+    Returns ``(n_eig, has_as, has_muf)`` for ``ScetlibCachedXsecTF``. These are
+    what turn the model from "alpha_s at fixed PDF plus the NP lambdas" into a
+    continuous parametrisation of the whole SCETlib theory uncertainty, so the
+    corresponding card templates can be dropped instead of double-counted.
+    """
+    up = _upstream_prepare_cache()
+    repo = _scetlib_src()
+    pdf_set = conf["QCD"]["pdf_set"]
+    n_eig = args.pdf_eig if args.pdf_eig >= 0 else (up.pdf_set_size(pdf_set) - 1) // 2
+    nf = conf["QCD"].getint("nf", fallback=5)
+    as_cen = float(p0[names.index("alphas")]) if "alphas" in names else 0.0
+    as_step = 0.0
+    pair = up.find_alphas_pair(pdf_set, args.as_pair, as_cen)
+    # muF is not live in the kernel (the beam convolutions are frozen at their
+    # own muF), so it rides on two extra members at kappa_F = 0.5 / 2.0,
+    # interpolated in t = ln(kappa_F)/ln(muf_hi): exact at 0.5, 1, 2.
+    muf_lo, muf_hi = (0.0, 0.0) if args.no_muf else (0.5, 2.0)
+    if not (n_eig or pair or muf_hi):
+        return 0, False, False
+
+    members = list(range(1, 2 * n_eig + 1))
+    sets = [pdf_set] * len(members)
+    if n_eig:
+        up.ensure_beamfunc_grids(repo, pdf_set, members, args.grid_jobs)
+    if pair:
+        # LAST and in (down, up) order -- both builders index the pair from the
+        # end. Its effect is added to the EXISTING alphas slot, so one parameter
+        # moves the calculation and the PDF together; without it, alphas is a
+        # partial derivative at fixed PDF.
+        down, up_set, as_step = pair
+        sets += [down, up_set]
+        members += [0, 0]
+        up.ensure_beamfunc_grids(repo, down, [0], args.grid_jobs)
+        up.ensure_beamfunc_grids(repo, up_set, [0], args.grid_jobs)
+        print(
+            f"  alphaS pair: {down} / {up_set}, central {as_cen:.4f} "
+            f"+- {as_step:.4f}",
+            flush=True,
+        )
+    if muf_hi:
+        # After the alphaS pair, in (lo, hi) order. The set/member entries are
+        # unused for these two -- the scale moves, not the PDF -- but one entry
+        # per member is still required.
+        sets += [pdf_set, pdf_set]
+        members += [0, 0]
+        print(f"  muF pair: kappa_F = {muf_lo} / {muf_hi}", flush=True)
+
+    mem = np.array(members, dtype=np.int32)
+    t0 = time.time()
+    sing.build_pdf_variations(
+        sets,
+        mem,
+        nf,
+        p0,
+        n_train_var=3,
+        n_eig=n_eig,
+        as_cen=as_cen,
+        as_step=as_step,
+        muf_lo=muf_lo,
+        muf_hi=muf_hi,
+    )
+    print(
+        f"  {n_eig} PDF eigenvector pairs for the resummed piece in "
+        f"{(time.time() - t0) / 60:.1f} min",
+        flush=True,
+    )
+    t0 = time.time()
+    nons.build_fo_pdf_variations(
+        sets,
+        mem,
+        nf,
+        bins,
+        np.asarray(nons.gradient_central()),
+        n_eig=n_eig,
+        as_cen=as_cen,
+        as_step=as_step,
+        muf_lo=muf_lo,
+        muf_hi=muf_hi,
+    )
+    print(
+        f"  ... and for the fixed-order piece in " f"{(time.time() - t0) / 60:.1f} min",
+        flush=True,
+    )
+    return n_eig, as_step > 0.0, muf_hi > 0.0
 
 
 def write_runcard(base_conf, out_path, gen_axes, Q_lo, Q_hi):
@@ -155,6 +269,37 @@ def main():
         "least-squares solve grows roughly like n_train^2, so "
         "raising it with the parameter count is the expensive "
         "knob (see doc/autodiff-design.md)",
+    )
+    ap.add_argument(
+        "--pdf-eig",
+        type=int,
+        default=-1,
+        help="number of PDF eigenvector pairs (default: all of the set). 0 "
+        "still keeps the alphaS pair, which is a separate direction.",
+    )
+    ap.add_argument(
+        "--as-pair",
+        default="auto",
+        help="'auto' finds <set>_as_0116/_as_0120, 'off' disables (alphas then "
+        "moves the calculation but NOT the PDF), or 'down,up' explicitly.",
+    )
+    ap.add_argument(
+        "--no-muf",
+        action="store_true",
+        help="skip the muF member pair (then resumScaleMuF does nothing and the "
+        "card's resumFOScale* must be kept).",
+    )
+    ap.add_argument(
+        "--no-pdf",
+        action="store_true",
+        help="physics-only cache: no PDF eigenvectors, no alphaS pair, no muF. "
+        "alphaS is then a fixed-PDF derivative -- do not quote it.",
+    )
+    ap.add_argument(
+        "--grid-jobs",
+        type=int,
+        default=0,
+        help="parallel beamfunc-grid generation jobs (0 = one per core).",
     )
     ap.add_argument(
         "--dry-run",
@@ -241,10 +386,25 @@ def main():
     sigma.sigma_binned_batch(bins, p0)
     print(f"fixed-order grid warmed in {(time.time() - t0) / 60:.1f} min", flush=True)
 
+    if args.no_pdf:
+        n_eig, has_as, has_muf = 0, False, False
+        print(
+            "\n--no-pdf: physics-only cache. alphaS will be a derivative at "
+            "FIXED PDF, and the card's pdf*/pdfAlphaS/resumFOScale* templates "
+            "must be kept.",
+            flush=True,
+        )
+    else:
+        n_eig, has_as, has_muf = build_variations(
+            sing, nons, bins, p0, names, conf, args
+        )
+
     from scetlib_tf import ScetlibCachedXsecTF
 
     out = os.path.join(args.outdir, args.outname)
-    ScetlibCachedXsecTF(sing, nons, bins=bins).save(out)
+    ScetlibCachedXsecTF(
+        sing, nons, bins=bins, n_eig=n_eig, has_as=has_as, has_muf=has_muf
+    ).save(out)
     path = out + ".npz"
     print(f"\nwrote {path} ({os.path.getsize(path) / 1e6:.1f} MB)")
     print(
