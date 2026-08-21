@@ -39,15 +39,21 @@ VALIDATION STATUS of the scale directions, which is NOT uniform -- see
   ``kappaFO0.5-kappaf2.`` only to 4.0e-02 -- the down direction is 10x worse
   than the up direction, and this is the direction that dominates
   sigma(alpha_s) (rho(alphaS, resumScaleMuR) = +0.93);
-* the TRANSITION POINTS DISAGREE IN SIGN with their templates. All three
-  ``transition_points*`` variations move the prediction the opposite way from
-  the reference (e.g. model [1.0000, 1.1593] against reference
-  [0.9602, 1.0000]), including the one that moves ``x1``/``x3`` rather than
-  ``x2``, so it is not a mapping slip in the validation table. Cause not yet
-  identified -- a convention difference between ``set_diff_scales`` and the
-  production ``transition_points`` setting is the leading suspect. DO NOT float
-  ``resumTransition*`` for a physics result until this is resolved; ``x1`` and
-  ``x3`` are in :data:`params.DEFAULT_FROZEN` already.
+* the TRANSITION POINTS DISAGREE IN SIGN with their templates, and the cause is
+  upstream, not here. All three ``transition_points*`` variations move the
+  prediction the opposite way from the reference (e.g. model [1.0000, 1.1593]
+  against reference [0.9602, 1.0000]). Making the identical physical change
+  through the RUNCARD with ``set_diff_scales`` off reproduces the template to
+  2e-6; through the registered parameter with it on, the response is sign-flipped
+  and roughly -7x in slope. Moving the transition points moves ``muF`` by ~20%
+  (``muF`` has its own profile over the same points) while the per-node beam
+  convolutions stay frozen at the config's ``muF`` -- they shift 7-16% over that
+  range. ``kappa_R`` escapes this because ``set_muR_factor`` holds ``muF`` fixed
+  by construction. Not fixable from Python: the ``muF`` machinery interpolates a
+  GLOBAL member while the induced shift is PER NODE. All three
+  ``resumTransition*`` are therefore in :data:`params.DEFAULT_FROZEN`; that
+  removes the transition-point uncertainty from the fit, which is a known gap
+  rather than a fix. Re-run ``validate_variations.py`` before unfreezing.
 
 How the derivatives get into TensorFlow
 --------------------------------------
@@ -77,8 +83,8 @@ import re
 
 import numpy as np
 import tensorflow as tf
-from rabbit.param_models.param_model import ParamModel
 
+from rabbit.param_models.param_model import ParamModel
 from wremnants.postprocessing.scetlib_ad import params as adp
 from wremnants.postprocessing.scetlib_ad.response import (
     DEFAULT_RESPONSE_GROUP,
@@ -468,6 +474,16 @@ class SCETlibADParamModel(ParamModel):
                 f"cache's parameter set {available}. A parameter can only be "
                 f"fitted if the runcard declared it before the rules were built."
             )
+        # Floating a direction whose response we have measured to be wrong is
+        # allowed -- it is how the fix gets tested -- but never silently.
+        for n in requested:
+            if n in adp.KNOWN_BAD_RESPONSE:
+                print(
+                    f"[SCETlibADParamModel] WARNING: floating {n!r}, whose "
+                    f"response is {adp.KNOWN_BAD_RESPONSE[n]}. It is in "
+                    f"DEFAULT_FROZEN for that reason; this fit is a study, not a "
+                    f"physics result."
+                )
         pois = _as_name_tuple(poi_params)
         bad_pois = [n for n in pois if n not in requested]
         if bad_pois:

@@ -212,7 +212,32 @@ DEFAULT_FROZEN = (
     # the PRIOR_SIGMAS comment. Float these two only as a deliberate study.
     "resumTransition1",
     "resumTransition3",
+    # resumTransition2 is frozen NOT as a physics choice but because the
+    # derivative SCETlib hands us for it is wrong. Making the identical physical
+    # change through the runcard with autodiff OFF reproduces the production
+    # template to 2e-6; making it through the registered scale_x2 parameter with
+    # set_diff_scales(1) comes out with the OPPOSITE SIGN (0.966985 where the
+    # template says 1.159163 at qT [33,44]), because moving the transition points
+    # moves muF ~20% while the per-node beam convolutions stay frozen at the
+    # config's muF. See studies/scetlib-ad-param-model/ for the elimination chain
+    # and the upstream issue. Freezing it removes the transition-point
+    # uncertainty from the fit -- that is a KNOWN GAP, not a fix; it is preferable
+    # only to profiling against a wrong-sign response. Unfreeze when upstream
+    # lands a per-node muF, and re-run validate_variations.py before trusting it.
+    "resumTransition2",
 )
+
+# Directions whose response has been MEASURED to disagree with the template it
+# replaces, keyed by rabbit-facing name -> why. These are not frozen for physics
+# reasons, so anyone who floats one anyway deserves to be told once, loudly,
+# rather than to find out from a pull. Keep the strings short; the detail lives in
+# studies/scetlib-ad-param-model/.
+KNOWN_BAD_RESPONSE = {
+    "resumTransition1": "sign-inverted vs the template (upstream: per-node muF)",
+    "resumTransition2": "sign-inverted vs the template (upstream: per-node muF)",
+    "resumTransition3": "sign-inverted vs the template (upstream: per-node muF)",
+}
+
 
 # Grouped impacts over the model's own parameters (rabbit resolves these labels
 # to floating x-indices; see Fitter._resolved_param_impact_groups). Membership is
