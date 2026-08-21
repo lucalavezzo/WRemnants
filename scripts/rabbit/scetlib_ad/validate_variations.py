@@ -184,6 +184,13 @@ def main():
         "--only", nargs="*", default=None, help="restrict to these variation labels"
     )
     ap.add_argument("--plot-dir", default=None)
+    ap.add_argument(
+        "--profile",
+        action="store_true",
+        help="print the qT profile of max|dev| over |Y| for each variation, "
+        "which separates a low-qT cutoff artefact from a genuine "
+        "disagreement in the response",
+    )
     args = ap.parse_args()
 
     core = ScetlibADXsec(args.conf, args.cache, threads=args.threads)
@@ -246,7 +253,7 @@ def main():
     todo = [L for L in labels if L != CENTRAL and (args.only is None or L in args.only)]
     print(
         f"\n{'variation':<32} {'max|dev|':>10} {'mean|dev|':>10} "
-        f"{'model rng':>18} {'ref rng':>18}"
+        f"{'model rng':>18} {'ref rng':>18} {'worst qT':>12}"
     )
     rows, skipped = [], []
     for L in todo:
@@ -262,12 +269,27 @@ def main():
         rr = ref_on_grid(L) / r_cen
         good = np.isfinite(rm) & np.isfinite(rr) & (rr != 0)
         dev = np.abs(rm[good] / rr[good] - 1.0)
+        # WHERE in qT the disagreement sits, which is the question that decides
+        # whether a residual is the known low-qT cutoff mismatch or something
+        # else. Arrays are (|Y|, qT) and C-ordered, so the qT index of the worst
+        # bin is the flat argmax modulo the number of qT bins.
+        with np.errstate(divide="ignore", invalid="ignore"):
+            dev2 = np.where(good, np.abs(rm / rr - 1.0), np.nan)
+        nqt = dev2.shape[1]
+        iq = int(np.nanargmax(dev2) % nqt)
         rows.append((L, float(dev.max()), float(dev.mean())))
         print(
             f"{L:<32} {dev.max():10.2e} {dev.mean():10.2e} "
             f"[{rm[good].min():.4f},{rm[good].max():.4f}] "
-            f"[{rr[good].min():.4f},{rr[good].max():.4f}]"
+            f"[{rr[good].min():.4f},{rr[good].max():.4f}] "
+            f"{'[' + format(Te[iq], 'g') + ',' + format(Te[iq + 1], 'g') + ']':>12}"
         )
+        if args.profile:
+            per_qt = np.nanmax(dev2, axis=0)
+            print("      qT profile of max|dev| over |Y|:")
+            for k in range(nqt):
+                bar = "#" * int(min(40, round(40 * per_qt[k] / np.nanmax(per_qt))))
+                print(f"        [{Te[k]:6g},{Te[k + 1]:6g}] {per_qt[k]:10.2e} {bar}")
         if args.plot_dir:
             # Y-integrated response: sum sigma over |Y| first, then divide.
             rm1 = s_var.sum(axis=0) / s_cen.sum(axis=0)
