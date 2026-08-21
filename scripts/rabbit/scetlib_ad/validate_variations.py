@@ -76,6 +76,47 @@ for _t in ("b_qqV", "b_qqbarV", "b_qqS", "b_qqDS", "b_qg"):
 CORR_HIST_SUFFIX = "_hist"
 CENTRAL = "central"
 
+# The alphaS variations live in a SEPARATE corr file (`*_pdfas_CorrZ`), whose
+# labels carry the PDF set name -- pdfCT18ZNNLO_as_0116, or ALPHAS_116 for
+# HERAPDF -- so they are resolved by pattern rather than listed. as_0118 is that
+# file's CENTRAL, not a variation.
+_AS_RE = re.compile(r"(?:_as_0|ALPHAS_)(\d{3})$", re.I)
+# PDF eigenvectors live in `*_pdfvars_CorrZ`: pdf0 is the central and
+# pdf(2i+1)/pdf(2i+2) are eigenvector i up/down, i.e. c_e = +-1. Needs a cache
+# built with n_eig > 0; otherwise these are reported as skipped, not silently
+# passed.
+_PDF_RE = re.compile(r"^pdf(\d+)$")
+
+
+def variation_for(label):
+    """Label -> {SCETlib parameter: physical value}, or None if unmapped."""
+    if label in VARIATIONS:
+        return VARIATIONS[label]
+    m = _AS_RE.search(label)
+    if m:
+        return {"alphas": float("0." + m.group(1))}
+    m = _PDF_RE.match(label)
+    if m:
+        n = int(m.group(1))
+        if n == 0:
+            return None  # the central of that file
+        i, side = (n - 1) // 2, (n - 1) % 2  # up first, then down
+        return {f"pdf_eig{i}": 1.0 if side == 0 else -1.0}
+    return None
+
+
+def central_label(labels):
+    """The label a file's variations are ratios to."""
+    if CENTRAL in labels:
+        return CENTRAL
+    for cand in labels:
+        m = _AS_RE.search(cand)
+        if m and m.group(1) == "118":
+            return cand
+    if "pdf0" in labels:
+        return "pdf0"
+    raise SystemExit(f"cannot identify the central among {labels[:6]}")
+
 
 def load_corr(path):
     """The theory-correction sigma hist (Q, absY, qT, charge, vars)."""
@@ -172,92 +213,22 @@ def plot_response(label, Te, r_model, r_ref, outdir, meta):
     )
 
 
-def main():
-    ap = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
-    )
-    ap.add_argument("--corr", required=True, help="scetlib_dyturbo_*_Corr<B>.pkl.lz4")
-    ap.add_argument("--cache", required=True)
-    ap.add_argument("--conf", required=True)
-    ap.add_argument("--threads", type=int, default=32)
-    ap.add_argument(
-        "--only", nargs="*", default=None, help="restrict to these variation labels"
-    )
-    ap.add_argument("--plot-dir", default=None)
-    ap.add_argument(
-        "--profile",
-        action="store_true",
-        help="print the qT profile of max|dev| over |Y| for each variation, "
-        "which separates a low-qT cutoff artefact from a genuine "
-        "disagreement in the response",
-    )
-    args = ap.parse_args()
-
-    core = ScetlibADXsec(args.conf, args.cache, threads=args.threads)
-    names = list(core.param_names)
-    print(f"cache: {core.n_bins} bins, {core.n_params} params")
-
-    h = load_corr(args.corr)
-    ax = {a.name: a for a in h.axes}
-    labels = [str(x) for x in ax["vars"]]
-    # bin-integrated sigma on (absY, qT) for one Q and one charge bin
-    vals = np.asarray(h.values(flow=False))
-    dims = [a.name for a in h.axes]
-    iQ, ich = dims.index("Q"), dims.index("charge")
-    if vals.shape[iQ] != 1 or vals.shape[ich] != 1:
-        raise SystemExit("expected a single Q and charge bin in the correction")
-    vals = np.squeeze(vals, axis=(iQ, ich))  # (absY, qT, vars) order-dependent
-    order = [d for d in dims if d not in ("Q", "charge")]
-    vals = np.moveaxis(
-        vals, [order.index("absY"), order.index("qT"), order.index("vars")], [0, 1, 2]
-    )
-
-    # the cache's gen grid, from the bins themselves
-    b = core.bins
-    yl = np.unique(np.round(b[:, 2:4], 12), axis=0)
-    tl = np.unique(np.round(b[:, 4:6], 12), axis=0)
-    yl, tl = yl[np.argsort(yl[:, 0])], tl[np.argsort(tl[:, 0])]
-    Ye = np.concatenate([yl[:, 0], yl[-1:, 1]])
-    Te = np.concatenate([tl[:, 0], tl[-1:, 1]])
-    print(
-        f"model grid: |Y| {Ye.size-1} bins [{Ye[0]:g}, {Ye[-1]:g}], "
-        f"qT {Te.size-1} bins [{Te[0]:g}, {Te[-1]:g}]"
-    )
-    MY = merge_matrix(ax["absY"].edges, Ye, "absY")
-    MT = merge_matrix(ax["qT"].edges, Te, "qT")
-
-    def ref_on_grid(label):
-        v = vals[:, :, labels.index(label)]
-        return MY @ v @ MT.T  # (nY, nT)
-
-    # GenFold indexes in the order the gen axes are GIVEN, and the cache was
-    # built from the card as (ptVGen, absYVGen) -- gen shape (21, 10). Passing
-    # them Y-first makes it read the Y edges as qT and reject the cache.
-    fold = core.fold_for([("ptVGen", Te), ("absYVGen", Ye)], b[0, 0], b[0, 1])
-    anchor = core.anchor.copy()
-
-    def model_on_grid(overrides):
-        p = anchor.copy()
-        for k, val in overrides.items():
-            if k not in names:
-                return None
-            p[names.index(k)] = val
-        vals_, _ = core.values_and_jacobian(p)
-        # fold -> (ptVGen, absYVGen); transpose to the (|Y|, qT) convention the
-        # reference side uses.
-        return fold(np.asarray(vals_, float)).reshape(Te.size - 1, Ye.size - 1).T
-
-    s_cen = model_on_grid({})
-    r_cen = ref_on_grid(CENTRAL)
-
-    todo = [L for L in labels if L != CENTRAL and (args.only is None or L in args.only)]
-    print(
-        f"\n{'variation':<32} {'max|dev|':>10} {'mean|dev|':>10} "
-        f"{'model rng':>18} {'ref rng':>18} {'worst qT':>12}"
-    )
-    rows, skipped = [], []
+def _one_file(
+    path,
+    todo,
+    cen_lab,
+    ref_on_grid,
+    r_cen,
+    s_cen,
+    model_on_grid,
+    Te,
+    args,
+    rows,
+    skipped,
+):
+    """Compare every mapped variation in one correction file."""
     for L in todo:
-        ov = VARIATIONS.get(L)
+        ov = variation_for(L)
         if ov is None:
             skipped.append((L, "no mapping"))
             continue
@@ -303,13 +274,129 @@ def main():
                 {
                     "variation": L,
                     "model setting": str(ov),
-                    "reference": os.path.basename(args.corr),
+                    "reference": os.path.basename(path),
                     "cache": os.path.basename(args.cache),
                     "both curves": "variation / central (a RESPONSE, not a xsec)",
                     "max|model/template - 1| (all bins)": f"{dev.max():.3e}",
                     "mean|.| (all bins)": f"{dev.mean():.3e}",
                 },
             )
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    ap.add_argument(
+        "--corr",
+        required=True,
+        nargs="+",
+        help="one or more scetlib_dyturbo_*_Corr<B>.pkl.lz4. Pass the matching "
+        "*_pdfas_CorrZ alongside the main file to validate alphaS: the alphaS "
+        "variations are NOT in the main correction.",
+    )
+    ap.add_argument("--cache", required=True)
+    ap.add_argument("--conf", required=True)
+    ap.add_argument("--threads", type=int, default=32)
+    ap.add_argument(
+        "--only", nargs="*", default=None, help="restrict to these variation labels"
+    )
+    ap.add_argument("--plot-dir", default=None)
+    ap.add_argument(
+        "--profile",
+        action="store_true",
+        help="print the qT profile of max|dev| over |Y| for each variation, "
+        "which separates a low-qT cutoff artefact from a genuine "
+        "disagreement in the response",
+    )
+    args = ap.parse_args()
+
+    core = ScetlibADXsec(args.conf, args.cache, threads=args.threads)
+    names = list(core.param_names)
+    print(f"cache: {core.n_bins} bins, {core.n_params} params")
+
+    # the cache's gen grid, from the bins themselves
+    b = core.bins
+    yl = np.unique(np.round(b[:, 2:4], 12), axis=0)
+    tl = np.unique(np.round(b[:, 4:6], 12), axis=0)
+    yl, tl = yl[np.argsort(yl[:, 0])], tl[np.argsort(tl[:, 0])]
+    Ye = np.concatenate([yl[:, 0], yl[-1:, 1]])
+    Te = np.concatenate([tl[:, 0], tl[-1:, 1]])
+    print(
+        f"model grid: |Y| {Ye.size-1} bins [{Ye[0]:g}, {Ye[-1]:g}], "
+        f"qT {Te.size-1} bins [{Te[0]:g}, {Te[-1]:g}]"
+    )
+
+    def make_reference(path):
+        """(labels, central, ref_on_grid) for one correction file."""
+        h = load_corr(path)
+        ax = {a.name: a for a in h.axes}
+        labels = [str(x) for x in ax["vars"]]
+        vals = np.asarray(h.values(flow=False))
+        dims = [a.name for a in h.axes]
+        iQ, ich = dims.index("Q"), dims.index("charge")
+        if vals.shape[iQ] != 1 or vals.shape[ich] != 1:
+            raise SystemExit(f"{path}: expected a single Q and charge bin")
+        vals = np.squeeze(vals, axis=(iQ, ich))
+        order = [d for d in dims if d not in ("Q", "charge")]
+        vals = np.moveaxis(
+            vals,
+            [order.index("absY"), order.index("qT"), order.index("vars")],
+            [0, 1, 2],
+        )
+        MY = merge_matrix(ax["absY"].edges, Ye, "absY")
+        MT = merge_matrix(ax["qT"].edges, Te, "qT")
+
+        def ref_on_grid(label):
+            return MY @ vals[:, :, labels.index(label)] @ MT.T  # (nY, nT)
+
+        return labels, central_label(labels), ref_on_grid
+
+    # GenFold indexes in the order the gen axes are GIVEN, and the cache was
+    # built from the card as (ptVGen, absYVGen) -- gen shape (21, 10). Passing
+    # them Y-first makes it read the Y edges as qT and reject the cache.
+    fold = core.fold_for([("ptVGen", Te), ("absYVGen", Ye)], b[0, 0], b[0, 1])
+    anchor = core.anchor.copy()
+
+    def model_on_grid(overrides):
+        p = anchor.copy()
+        for k, val in overrides.items():
+            if k not in names:
+                return None
+            p[names.index(k)] = val
+        vals_, _ = core.values_and_jacobian(p)
+        # fold -> (ptVGen, absYVGen); transpose to the (|Y|, qT) convention the
+        # reference side uses.
+        return fold(np.asarray(vals_, float)).reshape(Te.size - 1, Ye.size - 1).T
+
+    s_cen = model_on_grid({})
+
+    print(
+        f"\n{'variation':<32} {'max|dev|':>10} {'mean|dev|':>10} "
+        f"{'model rng':>18} {'ref rng':>18} {'worst qT':>12}"
+    )
+    rows, skipped = [], []
+    for path in args.corr:
+        labels, cen_lab, ref_on_grid = make_reference(path)
+        r_cen = ref_on_grid(cen_lab)
+        todo = [
+            L for L in labels if L != cen_lab and (args.only is None or L in args.only)
+        ]
+        if len(args.corr) > 1:
+            print(f"  -- {os.path.basename(path)}  (central: {cen_lab})")
+        _one_file(
+            path,
+            todo,
+            cen_lab,
+            ref_on_grid,
+            r_cen,
+            s_cen,
+            model_on_grid,
+            Te,
+            args,
+            rows,
+            skipped,
+        )
     if skipped:
         print("\nskipped:")
         for L, why in skipped:

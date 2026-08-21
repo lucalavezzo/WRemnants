@@ -318,7 +318,6 @@ def main():
     args = ap.parse_args()
 
     from rabbit.inputdata import FitInputData
-
     from wremnants.postprocessing.scetlib_ad.param_model import SCETlibADParamModel
 
     if args.reference == "histmaker" and not args.histmaker:
