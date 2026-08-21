@@ -21,10 +21,33 @@ calculation exposes is a continuous fit parameter with exact derivatives:
   ``dsigma/dPDF . dPDF/dalpha_s`` piece into the ``alphaS`` slot, so ``alphaS``
   becomes the PDF-consistent coupling rather than alpha_s at fixed PDF.
 
+* the profile scales           -- ``set_diff_scales(1)`` registers the
+  resummation ``kappa_R`` and the three matching transition points
+  ``x1..x3`` as differentiable, so these no longer need template nuisances.
+  ``kappa_F`` gets a slot too but is INERT in the kernel: it does nothing
+  unless the cache was built with the muF member pair, and a fit that tries to
+  float it is refused (see :meth:`_check_no_inert_params`).
+
 Which of these are present is a property of the cache, not of this file: the
-model reads ``gradient_param_names()`` and registers what it finds. Only the
-profile-scale parameters (``kappaFO``, ``kappaf``, ``muf``, the transition
-points) are outside SCETlib's autodiff and still need template nuisances.
+model reads ``gradient_param_names()`` and registers what it finds.
+
+VALIDATION STATUS of the scale directions, which is NOT uniform -- see
+``scripts/rabbit/scetlib_ad/validate_variations.py``:
+
+* the TNPs reproduce their templates to 1e-4..1e-16, the NP lambdas to ~1e-3;
+* ``kappa_R`` reproduces ``kappaFO2.-kappaf0.5`` to 4.5e-03 but
+  ``kappaFO0.5-kappaf2.`` only to 4.0e-02 -- the down direction is 10x worse
+  than the up direction, and this is the direction that dominates
+  sigma(alpha_s) (rho(alphaS, resumScaleMuR) = +0.93);
+* the TRANSITION POINTS DISAGREE IN SIGN with their templates. All three
+  ``transition_points*`` variations move the prediction the opposite way from
+  the reference (e.g. model [1.0000, 1.1593] against reference
+  [0.9602, 1.0000]), including the one that moves ``x1``/``x3`` rather than
+  ``x2``, so it is not a mapping slip in the validation table. Cause not yet
+  identified -- a convention difference between ``set_diff_scales`` and the
+  production ``transition_points`` setting is the leading suspect. DO NOT float
+  ``resumTransition*`` for a physics result until this is resolved; ``x1`` and
+  ``x3`` are in :data:`params.DEFAULT_FROZEN` already.
 
 How the derivatives get into TensorFlow
 --------------------------------------
@@ -470,7 +493,7 @@ class SCETlibADParamModel(ParamModel):
         # contains a gather, whose gradient TF represents as tf.IndexedSlices, and
         # the SCETlib bridge's second-order py_function payloads call .numpy() on
         # the incoming cotangent and die on it. A matmul against a constant gives
-        # a dense gradient, so the differentiate=through path survives at second
+        # a dense gradient, so differentiation survives at second
         # order. Bit-identical to the scatter (the entries are exactly 0 and 1)
         # and negligible in cost: (n_scetlib, n_fit) is at most ~25 x 25.
         self._select = np.zeros((len(available), len(self._param_order)))
