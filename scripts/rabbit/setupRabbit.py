@@ -1718,6 +1718,19 @@ def setup(
 
     signal_samples_forMass = ["signal_samples_inctau"]
 
+    def groupsWithHist(histname):
+        # groups for which every member has the histogram, so that histmaker outputs
+        # produced before a process (or an option) was added keep working
+        return [
+            g
+            for g in datagroups.procGroups["MCnoQCD"]
+            if len(datagroups.groups[g].members)
+            and all(
+                histname in datagroups.results.get(m.name, {}).get("output", {})
+                for m in datagroups.groups[g].members
+            )
+        ]
+
     datagroups.writer = writer
 
     for pseudodata in args.pseudoDataFakes:
@@ -2283,6 +2296,22 @@ def setup(
                 groups=[f"CMS_background", "experiment", "expNoLumi", "expNoCalib"],
                 passToFakes=passSystToFakes,
                 norm=1.06,
+            )
+        if "Top" in groupsWithHist("nominal_topPtNNLO"):
+            # the top pt reweighting is applied in the histmaker, its size is taken as
+            # the uncertainty (mirrored), as recommended by the TOP PAG
+            datagroups.addSystematic(
+                "topPtNNLO",
+                processes=["Top"],
+                mirror=True,
+                groups=[
+                    "CMS_background",
+                    "experiment",
+                    "expNoLumi",
+                    "expNoCalib",
+                ],
+                systAxes=[],
+                passToFakes=passSystToFakes,
             )
         if "Diboson" in datagroups.groups:
             datagroups.addNormSystematic(
@@ -2978,19 +3007,6 @@ def setup(
                     systAxes=["tensor_axis_0"],
                     labelsByAxis=[""],
                 )
-
-    def groupsWithHist(histname):
-        # groups for which every member has the histogram, so that histmaker outputs
-        # produced before a process (or an option) was added keep working
-        return [
-            g
-            for g in datagroups.procGroups["MCnoQCD"]
-            if len(datagroups.groups[g].members)
-            and all(
-                histname in datagroups.results.get(m.name, {}).get("output", {})
-                for m in datagroups.groups[g].members
-            )
-        ]
 
     if (wmass or wlike) and datagroups.args_from_metadata("recoilUnc"):
         # apply the uncertainty to every process the recoil calibration was applied to
