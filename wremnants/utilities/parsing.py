@@ -227,6 +227,11 @@ def common_parser(analysis_label=""):
         help="Run the recoil calibration with uncertainties (slower)",
     )
     parser.add_argument(
+        "--recoilGenProxy",
+        action="store_true",
+        help="In the Z analyses, apply the recoil calibration along the gen boson proxy (gen non-triggering lepton + reco triggering lepton), as done for the W, instead of the reconstructed dilepton. For closure tests of the W application",
+    )
+    parser.add_argument(
         "--recoilQtMax",
         type=float,
         default=None,

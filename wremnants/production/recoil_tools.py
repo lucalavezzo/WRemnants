@@ -1246,7 +1246,9 @@ class Recoil:
 
     def apply_recoil_Z(self):
 
-        doGEN = False
+        # apply the calibration along the gen boson proxy, as done for the W, instead of
+        # the reconstructed dilepton: closure test of the W application on Z events
+        doGEN = self.args.recoilGenProxy
         if self.dataset.name in self.datasets_to_apply:
 
             if doGEN:
