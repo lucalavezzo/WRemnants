@@ -6,8 +6,8 @@ import sys
 
 import hist
 import numpy as np
-import rabbit.io_tools
 
+import rabbit.io_tools
 from rabbit import auxiliary, tensorwriter
 from wremnants.postprocessing import (
     rabbit_helpers,
@@ -2979,10 +2979,27 @@ def setup(
                     labelsByAxis=[""],
                 )
 
+    def groupsWithHist(histname):
+        # groups for which every member has the histogram, so that histmaker outputs
+        # produced before a process (or an option) was added keep working
+        return [
+            g
+            for g in datagroups.procGroups["MCnoQCD"]
+            if len(datagroups.groups[g].members)
+            and all(
+                histname in datagroups.results.get(m.name, {}).get("output", {})
+                for m in datagroups.groups[g].members
+            )
+        ]
+
     if (wmass or wlike) and datagroups.args_from_metadata("recoilUnc"):
+        # apply the uncertainty to every process the recoil calibration was applied to
+        # (samples.wprocs_recoil / zprocs_recoil), i.e. those with the variations stored
+        recoilSamples = groupsWithHist("nominal_recoil_stat")
+        logger.info(f"Apply the recoil uncertainty to {recoilSamples}")
         rabbit_helpers.add_recoil_uncertainty(
             datagroups,
-            ["signal_samples"],
+            recoilSamples,
             passSystToFakes=passSystToFakes,
             flavor=datagroups.flavor if datagroups.flavor else "mu",
             pu_type="lowPU" if lowPU else "highPU",

@@ -1327,8 +1327,12 @@ def build_graph(df, dataset):
 
     nominal = df.HistoBoost("nominal", axes, [*cols, "nominal_weight"])
     results.append(nominal)
-    nominal_noSF = df.HistoBoost("nominal_noSF", axes, [*cols, "nominal_weight_noSF"])
-    results.append(nominal_noSF)
+    if not args.onlyMainHistograms:
+        # nominal_weight_noSF is only defined together with the auxiliary histograms
+        nominal_noSF = df.HistoBoost(
+            "nominal_noSF", axes, [*cols, "nominal_weight_noSF"]
+        )
+        results.append(nominal_noSF)
 
     if useTnpMuonVarForSF and not args.onlyMainHistograms and not args.unfolding:
         df = df.Define(
