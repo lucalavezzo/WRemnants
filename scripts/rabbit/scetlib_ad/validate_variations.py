@@ -213,6 +213,62 @@ def plot_response(label, Te, r_model, r_ref, outdir, meta):
     )
 
 
+def _plot_central(s_cen, r_cen, Te, outdir, meta, y_factor, tag):
+    """Model vs reference CENTRAL cross section, |Y| integrated.
+
+    Every variation plot is a variation/central ratio, so a common
+    normalisation cancels there and the central is the one thing they cannot
+    show. It is worth its own plot for that reason.
+
+    y_factor converts the cache's rapidity convention to the reference's: a
+    positive-side-only cache holds half the |Y|-integrated cross section, so it
+    is short by exactly 2. That is a convention, not a disagreement, and it is
+    applied here rather than divided out silently -- the ratio panel then shows
+    SHAPE, which is the part that matters.
+    """
+    import hist
+
+    from wums import output_tools, plot_tools
+
+    os.makedirs(outdir, exist_ok=True)
+
+    def h1(v):
+        h = hist.Hist(
+            hist.axis.Variable(Te, name="qT", overflow=False, underflow=False),
+            storage=hist.storage.Double(),
+        )
+        h.view(flow=False)[...] = np.asarray(v, float)
+        return h
+
+    m = np.nansum(np.asarray(s_cen, float), axis=0) * y_factor
+    r = np.nansum(np.asarray(r_cen, float), axis=0)
+    fig = plot_tools.makePlotWithRatioToRef(
+        [h1(r), h1(m)],
+        labels=["template  central", f"model  central (x{y_factor:g} for |Y|)"],
+        logoPos=0,
+        colors=["#5790fc", "#e42536"],
+        linestyles=["solid", "dashed"],
+        xlabel=r"boson $q_\mathrm{T}$ (GeV)",
+        ylabel=r"$\sigma$ (a.u.)",
+        rlabel=["model / template"],
+        rrange=[[0.95, 1.05]],
+        binwnorm=None,
+        logy=True,
+        yerr=False,
+        nlegcols=1,
+        cms_label="Work in progress",
+        grid=True,
+    )
+    name = f"central_{tag}" if tag else "central"
+    plot_tools.save_pdf_and_png(outdir, name, fig=fig)
+    output_tools.write_index_and_log(outdir, name, analysis_meta_info=meta, args=None)
+    ratio = m / np.where(r == 0, np.nan, r)
+    print(
+        f"  central shape, |Y| integrated: model/template "
+        f"{np.nanmin(ratio):.4f} .. {np.nanmax(ratio):.4f}"
+    )
+
+
 def _one_file(
     path,
     todo,
@@ -225,6 +281,7 @@ def _one_file(
     args,
     rows,
     skipped,
+    cover,
 ):
     """Compare every mapped variation in one correction file."""
     for L in todo:
@@ -238,7 +295,10 @@ def _one_file(
             continue
         rm = s_var / s_cen
         rr = ref_on_grid(L) / r_cen
-        good = np.isfinite(rm) & np.isfinite(rr) & (rr != 0)
+        # cover excludes gen bins a --partial subset cache does not tile;
+        # they fold to partial sums, so comparing them would invent a
+        # disagreement that says nothing about the model.
+        good = np.isfinite(rm) & np.isfinite(rr) & (rr != 0) & cover
         dev = np.abs(rm[good] / rr[good] - 1.0)
         # WHERE in qT the disagreement sits, which is the question that decides
         # whether a residual is the known low-qT cutoff mismatch or something
@@ -299,6 +359,15 @@ def main():
     ap.add_argument("--conf", required=True)
     ap.add_argument("--threads", type=int, default=32)
     ap.add_argument(
+        "--partial",
+        action="store_true",
+        help="allow a cache that covers only SOME of the card's gen bins, and "
+        "compare only the covered ones. For iterating on a subset cache built "
+        "with prepare_cache_for_card --subset: ten bins in a minute instead of "
+        "210 in seven hours. The number of excluded bins is always printed -- a "
+        "subset must never be able to look like a clean full validation.",
+    )
+    ap.add_argument(
         "--only", nargs="*", default=None, help="restrict to these variation labels"
     )
     ap.add_argument("--plot-dir", default=None)
@@ -355,7 +424,19 @@ def main():
     # GenFold indexes in the order the gen axes are GIVEN, and the cache was
     # built from the card as (ptVGen, absYVGen) -- gen shape (21, 10). Passing
     # them Y-first makes it read the Y edges as qT and reject the cache.
-    fold = core.fold_for([("ptVGen", Te), ("absYVGen", Ye)], b[0, 0], b[0, 1])
+    fold = core.fold_for(
+        [("ptVGen", Te), ("absYVGen", Ye)], b[0, 0], b[0, 1], partial=args.partial
+    )
+    # (|Y|, qT), matching the convention both sides are compared in below. With
+    # --partial this excludes the gen bins a subset cache does not tile, which
+    # would otherwise fold to partial sums and read as disagreement.
+    cover = fold.covered_mask.T
+    if not cover.all():
+        print(
+            f"   comparing {int(cover.sum())} of {cover.size} gen bins; "
+            f"{int((~cover).sum())} not covered by this cache and EXCLUDED",
+            flush=True,
+        )
     anchor = core.anchor.copy()
 
     def model_on_grid(overrides):
@@ -379,11 +460,54 @@ def main():
     for path in args.corr:
         labels, cen_lab, ref_on_grid = make_reference(path)
         r_cen = ref_on_grid(cen_lab)
+        # The CENTRAL, before any ratio. Every variation below is a
+        # variation/central ratio, so a common normalisation cancels and this is
+        # the one number that would not show up there. Reported as the spread of
+        # model/reference over bins: a flat value means the shapes agree and the
+        # offset is normalisation (the Y convention alone is a factor 2, and a
+        # positive-side-only cache is short by exactly that), while a VARYING
+        # value is a shape disagreement and matters.
+        cc = np.where(
+            cover & np.isfinite(s_cen) & np.isfinite(r_cen) & (r_cen != 0),
+            s_cen / np.where(r_cen == 0, 1, r_cen),
+            np.nan,
+        )
+        med = np.nanmedian(cc)
+        print(
+            f"  central model/reference: median {med:.6g}, "
+            f"spread about it {np.nanmin(cc / med) - 1:+.2e} .. "
+            f"{np.nanmax(cc / med) - 1:+.2e}"
+        )
         todo = [
             L for L in labels if L != cen_lab and (args.only is None or L in args.only)
         ]
         if len(args.corr) > 1:
             print(f"  -- {os.path.basename(path)}  (central: {cen_lab})")
+        if args.plot_dir:
+            yfac = (
+                2.0
+                if getattr(fold, "y_convention", "") == "positive-side-only"
+                else 1.0
+            )
+            _plot_central(
+                s_cen,
+                r_cen,
+                Te,
+                args.plot_dir,
+                {
+                    "what": "CENTRAL cross section, not a response",
+                    "reference": f"{os.path.basename(path)} :: {cen_lab}",
+                    "cache": os.path.basename(args.cache),
+                    "Y convention": (
+                        f"{getattr(fold, 'y_convention', '?')}, model scaled by "
+                        f"x{yfac:g} to match the reference"
+                    ),
+                    "ratio panel shows": "SHAPE; the normalisation is the "
+                    "convention factor above",
+                },
+                yfac,
+                "pdfas" if "pdfas" in os.path.basename(path) else "",
+            )
         _one_file(
             path,
             todo,
@@ -396,6 +520,7 @@ def main():
             args,
             rows,
             skipped,
+            cover,
         )
     if skipped:
         print("\nskipped:")

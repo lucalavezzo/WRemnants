@@ -212,31 +212,39 @@ DEFAULT_FROZEN = (
     # the PRIOR_SIGMAS comment. Float these two only as a deliberate study.
     "resumTransition1",
     "resumTransition3",
-    # resumTransition2 is frozen NOT as a physics choice but because the
-    # derivative SCETlib hands us for it is wrong. Making the identical physical
-    # change through the runcard with autodiff OFF reproduces the production
-    # template to 2e-6; making it through the registered scale_x2 parameter with
-    # set_diff_scales(1) comes out with the OPPOSITE SIGN (0.966985 where the
-    # template says 1.159163 at qT [33,44]), because moving the transition points
-    # moves muF ~20% while the per-node beam convolutions stay frozen at the
-    # config's muF. See studies/scetlib-ad-param-model/ for the elimination chain
-    # and the upstream issue. Freezing it removes the transition-point
-    # uncertainty from the fit -- that is a KNOWN GAP, not a fix; it is preferable
-    # only to profiling against a wrong-sign response. Unfreeze when upstream
-    # lands a per-node muF, and re-run validate_variations.py before trusting it.
-    "resumTransition2",
 )
+
+# resumTransition2 was frozen here from 2026-08-21 to 2026-08-25 because the
+# derivative SCETlib handed us for it was sign-inverted -- moving the transition
+# points moves muF while the per-node beam convolutions stayed at the config's
+# muF. UNFROZEN: scetlib-cms bfc6be6 feeds the induced per-node muF shift into
+# the muF member interpolation, and validate_variations now gives 1.1e-03 ..
+# 3.4e-03 against the production templates where it was 1.1e-01 .. 1.99e-01.
+#
+# Two caveats that survive the fix:
+#   * the residual is the interpolation's own limit, not a bug -- the induced
+#     shift is carried by a quadratic through three knots (kappa_F = 0.5/1/2),
+#     exact only AT the knots, and a transition variation lands between them.
+#     Upstream quotes +7.8e-04 against an independent runcard route.
+#   * the fix works THROUGH the muF member pair, so it does nothing without one.
+#     Upstream guards this rather than leaving it silent: moving scale_x1..x3 off
+#     the anchor on a cache with no muF pair RAISES ("the result would be WRONG,
+#     sign included"), and says which call builds the pair. So a --no-pdf cache
+#     cannot float the transition points at all -- which is also why
+#     backend_check fails on one.
 
 # Directions whose response has been MEASURED to disagree with the template it
 # replaces, keyed by rabbit-facing name -> why. These are not frozen for physics
 # reasons, so anyone who floats one anyway deserves to be told once, loudly,
 # rather than to find out from a pull. Keep the strings short; the detail lives in
 # studies/scetlib-ad-param-model/.
-KNOWN_BAD_RESPONSE = {
-    "resumTransition1": "sign-inverted vs the template (upstream: per-node muF)",
-    "resumTransition2": "sign-inverted vs the template (upstream: per-node muF)",
-    "resumTransition3": "sign-inverted vs the template (upstream: per-node muF)",
-}
+# Empty since 2026-08-25: every direction the model registers now agrees with its
+# production template. The worst of 39 is 1.4e-02 (mufup, qT [0,1], which is
+# template precision rather than a model error -- model/direct = 1.0000 there),
+# and 37 of them are <= 7.5e-03. Kept as the hook, because "this direction's
+# response is known-wrong, do not profile it" is worth being able to say loudly
+# rather than in a comment.
+KNOWN_BAD_RESPONSE = {}
 
 
 # Grouped impacts over the model's own parameters (rabbit resolves these labels
