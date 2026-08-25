@@ -1492,6 +1492,17 @@ def build_graph(df, dataset):
         "wrem::mt_2(goodMuons_pt0, goodMuons_phi0, MET_corr_rec_pt, MET_corr_rec_phi)",
     )
 
+    if not args.noRecoil and args.recoilQtMax is not None:
+        # recoil calibration evaluated at the uncapped boson pt, see recoil_tools.py
+        df = df.Define(
+            "transverseMass_recoilQtExtrap",
+            "wrem::mt_2(goodMuons_pt0, goodMuons_phi0, MET_corr_rec_qtExtrap_pt, MET_corr_rec_qtExtrap_phi)",
+        )
+        df = df.Define(
+            "goodMuons_angleSignUt_recoilQtExtrap0",
+            "wrem::zqtproj0_angleSign(goodMuons_pt0, goodMuons_phi0, MET_corr_rec_qtExtrap_pt, MET_corr_rec_qtExtrap_phi)",
+        )
+
     # Define dedicated systematics from scaling/smearing met_pt and smearing met_phi.
     # The used values are derived looking at template variations, but not optimized.
     # Their size can be customized in setupRabbit.py with the 'scale' argument of datagroups.addSystematic()
@@ -2286,6 +2297,25 @@ def build_graph(df, dataset):
             axes,
             [*cols_smearMET_phi, "nominal_weight"],
         )
+
+        if (
+            not args.noRecoil
+            and args.recoilQtMax is not None
+            and dataset.name in samples.wprocs_recoil
+        ):
+            cols_recoilQtExtrap = [
+                x.replace("transverseMass", "transverseMass_recoilQtExtrap").replace(
+                    "goodMuons_angleSignUt0", "goodMuons_angleSignUt_recoilQtExtrap0"
+                )
+                for x in cols
+            ]
+            systematics.add_syst_hist(
+                results,
+                df,
+                "nominal_recoilQtExtrap",
+                axes,
+                [*cols_recoilQtExtrap, "nominal_weight"],
+            )
 
         if args.makeMCefficiency:
             axes_WeffMC = [

@@ -227,6 +227,12 @@ def common_parser(analysis_label=""):
         help="Run the recoil calibration with uncertainties (slower)",
     )
     parser.add_argument(
+        "--recoilQtMax",
+        type=float,
+        default=None,
+        help="Evaluate the recoil calibration at min(ptV, RECOILQTMAX): the calibration is derived from Z events and has no statistics above ~150 GeV, where the model extrapolates. The uncapped calibration is stored as a systematic variation (nominal_recoilQtExtrap)",
+    )
+    parser.add_argument(
         "--highptscales",
         action="store_true",
         help="Apply highptscales option in MiNNLO for better description of data at high pT",

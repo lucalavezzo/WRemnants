@@ -3005,6 +3005,28 @@ def setup(
             pu_type="lowPU" if lowPU else "highPU",
         )
 
+    # calibration evaluated without the cap on the boson pt (histmaker --recoilQtMax),
+    # covering the extrapolation of the calibration beyond the range it was derived in
+    recoilQtExtrapSamples = groupsWithHist("nominal_recoilQtExtrap")
+    if len(recoilQtExtrapSamples):
+        logger.info(
+            f"Apply the recoil qt extrapolation uncertainty to {recoilQtExtrapSamples}"
+        )
+        datagroups.addSystematic(
+            "recoilQtExtrap",
+            mirror=True,
+            processes=recoilQtExtrapSamples,
+            groups=[
+                "recoil_qtExtrap",
+                "recoil",
+                "experiment",
+                "expNoLumi",
+                "expNoCalib",
+            ],
+            systAxes=[],
+            passToFakes=passSystToFakes,
+        )
+
     if lowPU:
         if datagroups.flavor in ["e", "ee"] and False:
             # disable, prefiring for muons currently broken? (fit fails)

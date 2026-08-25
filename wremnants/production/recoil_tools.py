@@ -1379,11 +1379,22 @@ class Recoil:
             """
 
             if self.recoilHelper != None:
+                # The calibration is derived from Z events and has no statistics above
+                # ~150 GeV, where the model extrapolates (the response correction runs
+                # away and the resolution collapses). Optionally evaluate it at a capped
+                # boson pt, keeping the true one for the decomposition and for the MET.
+                if self.args.recoilQtMax is not None:
+                    self.df = self.df.Define(
+                        "v_gen_pt_recoil",
+                        f"std::min<double>(v_gen_pt, {self.args.recoilQtMax})",
+                    )
+                else:
+                    self.df = self.df.Alias("v_gen_pt_recoil", "v_gen_pt")
                 self.df = self.df.Define(
                     "recoil_corr",
                     self.recoilHelper,
                     [
-                        "v_gen_pt",
+                        "v_gen_pt_recoil",
                         "recoil_corr_xy_para_qt_gen",
                         "recoil_corr_xy_perp_gen",
                     ],
@@ -1421,6 +1432,37 @@ class Recoil:
                 "met_corr_rec_y", "met_corr_rec_pt*sin(met_corr_rec_phi)"
             )
 
+            if self.args.recoilQtMax is not None and self.recoilHelper != None:
+                # the same calibration evaluated at the uncapped boson pt, stored as the
+                # systematic variation that covers the extrapolation
+                self.df = self.df.Define(
+                    "recoil_corr_qt_extrap",
+                    self.recoilHelper,
+                    [
+                        "v_gen_pt",
+                        "recoil_corr_xy_para_qt_gen",
+                        "recoil_corr_xy_perp_gen",
+                    ],
+                )
+                self.df = self.df.Define(
+                    "recoil_corr_rec_para_gen_qt_extrap",
+                    "recoil_corr_qt_extrap.ut_para_corr(0) - v_gen_pt",
+                )
+                self.df = self.df.Define(
+                    "recoil_corr_rec_perp_gen_qt_extrap",
+                    "recoil_corr_qt_extrap.ut_perp_corr(0)",
+                )
+                self.df = self.df.Define(
+                    "met_corr_rec_qt_extrap",
+                    "wrem::compute_met_from_recoil(recoil_corr_rec_para_gen_qt_extrap, recoil_corr_rec_perp_gen_qt_extrap, met_lep_pt, met_lep_phi, v_gen_pt, v_gen_phi)",
+                )
+                self.df = self.df.Define(
+                    "met_corr_rec_qt_extrap_pt", "met_corr_rec_qt_extrap[0]"
+                )
+                self.df = self.df.Define(
+                    "met_corr_rec_qt_extrap_phi", "met_corr_rec_qt_extrap[1]"
+                )
+
         else:
             self.df = self.df.Alias("met_corr_rec_pt", "met_corr_xy_pt")
             self.df = self.df.Alias("met_corr_rec_phi", "met_corr_xy_phi")
@@ -1429,6 +1471,20 @@ class Recoil:
 
         self.df = self.df.Alias("MET_corr_rec_pt", "met_corr_rec_pt")
         self.df = self.df.Alias("MET_corr_rec_phi", "met_corr_rec_phi")
+
+        if self.args.recoilQtMax is not None:
+            # no variation for the processes without a recoil calibration
+            if not self.df.HasColumn("met_corr_rec_qt_extrap_pt"):
+                self.df = self.df.Alias("met_corr_rec_qt_extrap_pt", "met_corr_rec_pt")
+                self.df = self.df.Alias(
+                    "met_corr_rec_qt_extrap_phi", "met_corr_rec_phi"
+                )
+            self.df = self.df.Alias(
+                "MET_corr_rec_qtExtrap_pt", "met_corr_rec_qt_extrap_pt"
+            )
+            self.df = self.df.Alias(
+                "MET_corr_rec_qtExtrap_phi", "met_corr_rec_qt_extrap_phi"
+            )
 
         self.recoil_vars_plots_W("uncorr")
         self.recoil_vars_plots_W("corr_lep")
