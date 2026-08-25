@@ -205,7 +205,17 @@ class GenFold:
     raises instead of quietly integrating over less phase space.
     """
 
-    def __init__(self, bins, gen_axes, Q_lo, Q_hi):
+    def __init__(self, bins, gen_axes, Q_lo, Q_hi, partial=False):
+        """``partial`` keeps a fold over a cache that tiles only SOME gen bins.
+
+        The fit must never use this: a partially covered gen bin folds to a
+        partial sum, which is a wrong cross section rather than a missing one, so
+        the default stays strict. It exists for validation on a subset cache --
+        ten bins built in a minute instead of 210 in seven hours -- where the
+        caller compares only the bins ``covered_mask`` marks and says so. The
+        mask is the whole point: without it a subset cache would silently report
+        agreement on bins it never computed.
+        """
         bins = np.asarray(bins, dtype=np.float64)
         qT_edges = np.asarray(gen_axes[0][1], dtype=np.float64)
         absY_edges = np.asarray(gen_axes[1][1], dtype=np.float64)
@@ -268,7 +278,19 @@ class GenFold:
         # An exactly tiled gen bin receives y_factor x its own (qT, |Y|) area.
         want = np.diff(qT_edges)[:, None] * np.diff(absY_edges)[None, :] * y_factor
         bad = np.abs(covered - want) > EDGE_TOL * np.maximum(want, 1.0)
-        if bad.any():
+        # (n_qT, n_absY) in the gen grid's own shape; True = exactly tiled and so
+        # safe to compare. Always set, so a caller can assert on it either way.
+        self.covered_mask = ~bad
+        if bad.any() and partial:
+            i, j = np.argwhere(bad)[0]
+            print(
+                f"scetlib_ad: PARTIAL fold -- {int(bad.sum())} of {bad.size} gen "
+                f"bin(s) are not tiled by this cache and fold to partial sums, "
+                f"e.g. qT [{qT_edges[i]:g}, {qT_edges[i + 1]:g}] x |Y| "
+                f"[{absY_edges[j]:g}, {absY_edges[j + 1]:g}]. Compare only where "
+                f"covered_mask is True; never fit with this."
+            )
+        elif bad.any():
             i, j = np.argwhere(bad)[0]
             raise ValueError(
                 f"scetlib_ad: {int(bad.sum())} gen bin(s) are not exactly tiled "
@@ -362,6 +384,17 @@ class ScetlibADXsec:
             fo_resolve_muR=want_scales,
         )
         sing, nons = self._sigma.sub_pieces()
+        # PDF eigenvector coefficients are ordinary AD parameters registered on
+        # the CALCULATION (set_pdf_eig_params), not something the cache file can
+        # install. They have to be registered BEFORE the rules are loaded: the
+        # rule fingerprint hashes the parameter names in order, and the members
+        # are interpolated from coefficient slots that would otherwise not exist.
+        # Taken from the cache's own names, so a cache built without
+        # eigenvectors is untouched.
+        n_eig = sum(1 for n in (cached_names or []) if n.startswith("pdf_eig"))
+        if n_eig:
+            sing.set_pdf_eig_params(n_eig)
+            nons.set_pdf_eig_params(n_eig)
         self._fn = ScetlibCachedXsecTF.load(self.cache_path, sing, nons)
 
         self.param_names = list(self._fn.param_names)
@@ -378,14 +411,14 @@ class ScetlibADXsec:
     # bin bookkeeping                                                     #
     # ------------------------------------------------------------------ #
 
-    def fold_for(self, gen_axes, Q_lo, Q_hi):
+    def fold_for(self, gen_axes, Q_lo, Q_hi, partial=False):
         """:class:`GenFold` summing this cache's bins onto the fit's gen grid.
 
         Matching is by VALUE, not by assuming the cache was generated in the
         grid's order: a transposed or differently-nested cache would otherwise be
         a silent wrong answer rather than an error.
         """
-        return GenFold(self.bins, gen_axes, float(Q_lo), float(Q_hi))
+        return GenFold(self.bins, gen_axes, float(Q_lo), float(Q_hi), partial)
 
     # ------------------------------------------------------------------ #
     # evaluation                                                          #
