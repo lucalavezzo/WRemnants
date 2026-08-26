@@ -1,6 +1,7 @@
 """
 This is the Low PU data set taken at 13 TeV with an integrated luminosity of about 200/pb
 """
+import copy
 
 from wremnants.utilities import common
 
@@ -122,3 +123,9 @@ dataDict = {
         "group": "Top",
     },
 }
+
+
+# 5.02 TeV low-PU has no separate extension samples, so the "extended" set is the
+# base set. Defined so histmakers that request extended=True (e.g. w_z_gen_dists.py
+# with a non-msht20an3lo --pdfs) work for this era instead of raising.
+dataDict_extended = copy.deepcopy(dataDict)

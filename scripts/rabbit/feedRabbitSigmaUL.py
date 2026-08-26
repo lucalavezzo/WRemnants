@@ -12,6 +12,7 @@ Output:
 
 import os
 
+from wremnants.postprocessing.scetlib_np import lambda_central as scetlib_lambda_central
 from wremnants.postprocessing.theory_fit_writer import SigmaULTheoryFitWriter
 from wremnants.utilities import common, parsing
 from wums import logging, output_tools
@@ -44,6 +45,12 @@ def make_parser():
         "-i",
         "--infile",
         type=str,
+        help="Input unfolded fit result for the Z sigmaUL distribution.",
+    )
+    parser.add_argument(
+        "--infile-result",
+        type=str,
+        default="asimov",
         help="Input unfolded fit result for the Z sigmaUL distribution.",
     )
     parser.add_argument(
@@ -100,7 +107,7 @@ def make_parser():
     parser.add_argument(
         "--systematicType",
         choices=["log_normal", "normal"],
-        default="normal",
+        default="log_normal",
         help="Probability density for systematic variations.",
     )
     parser.add_argument(
@@ -113,6 +120,30 @@ def make_parser():
         "--noHERAPDF20EXT",
         action="store_true",
         help="Exclude the HERAPDF20EXT variations (only applicable if using a HERAPDF20-based PDF). Useful for comparing to simultaneous PDF and alphaS fit, where this parametrization isn't available.",
+    )
+    parser.add_argument(
+        "--pseudodataVariation",
+        type=str,
+        default="",
+        help="Use this named variation of the pseudodataGenerator correction as the "
+        "sigmaUL pseudodata (instead of the baseline). E.g. the joint multi-lambda "
+        "var for the cross-term closure.",
+    )
+    parser.add_argument(
+        "--alphasGenerator",
+        type=str,
+        default=None,
+        help="Override the generator used for the pdfAlphaS variation (defaults to "
+        "<predGenerator>_pdfas). Use to borrow a standard _pdfas correction when the "
+        "predGenerator has none (e.g. the parity test).",
+    )
+    parser.add_argument(
+        "--npTemplates",
+        nargs="+",
+        default=[],
+        help="Correction var name(s) to add as mirrored (one-sided) template "
+        "nuisances alongside the param-model lambda, e.g. a TNP var 'gamma_nu' for "
+        "the TNP x lambda cross-term closure.",
     )
     return parser
 
@@ -152,6 +183,7 @@ def main():
         allow_negative_expectation=False,
         exclude_nuisances=exclude_nuisances,
         keep_nuisances=args.keepNuisances,
+        alphas_generator=args.alphasGenerator,
     )
 
     input_meta = writer.load_sigmaul_data(
@@ -159,6 +191,8 @@ def main():
         args.infile,
         args.fitresultMapping,
         args.channelSigmaUL,
+        infile_result=args.infile_result,
+        pseudodata_variation=args.pseudodataVariation
     )
     writer.add_sigmaul_process()
     writer.add_alphas_variation()
@@ -167,6 +201,8 @@ def main():
     writer.add_mb_fo_variations()
     writer.add_pdf_variations(args.scalePdf)
     writer.add_ew_isr_variation()
+    # Optional orthogonal group template nuisances (no-op unless --npTemplates given).
+    writer.add_np_template_variations(args.npTemplates)
 
     outfolder = args.outfolder or "./"
     meta = {
@@ -177,6 +213,25 @@ def main():
     }
     if input_meta is not None:
         meta["meta_info_input"] = input_meta
+    # The sigmaUL template and every theory variation in this tensor come from
+    # --predGenerator, so THAT correction's Nonperturbative runcard is this card's
+    # NP central -- not the one the reco histmaker used, which is what
+    # meta_info_input carries and what the SCETlib NP param model would otherwise
+    # auto-detect (lambda_central._iter_meta_levels). The two differ whenever the
+    # unfolding and the prediction use different SCETlib NP runcards, and a
+    # gen-level fit anchored at the wrong central reports lambdas relative to a
+    # prediction the card does not contain. Written at the TOP level so it wins
+    # that lookup; absent (and behaviour unchanged) for a non-NP predGenerator.
+    lambda_central_meta = scetlib_lambda_central.build_lambda_central_meta(
+        [args.predGenerator], procs=("Z",)
+    )
+    if lambda_central_meta:
+        meta[scetlib_lambda_central.META_KEY] = lambda_central_meta
+        writer.logger.info(
+            "Stored %s from the prediction %s",
+            scetlib_lambda_central.META_KEY,
+            args.predGenerator,
+        )
     outname = output_name(args.outname, args.predGenerator, args.nois, args.postfix)
     writer.write(
         outfolder=outfolder,

@@ -30,6 +30,12 @@ from wremnants.postprocessing.scetlib_np.params import GEN_AXES, RECO_AXES
 # (postfsr variants — nominal_postfsr_yieldsUnfolding / "postfsr" — also exist.)
 DEFAULT_HIST = "nominal_prefsr_yieldsUnfolding"
 DEFAULT_GENTOTAL = "prefsr"  # xnorm gen-total denominator (pre-reco-selection)
+# mz_dilepton --responseGenBinning writes a SECOND reco x gen pair on a finer gen
+# grid (the theory correction's own cells), in parallel to the unfolding one. Same
+# structure, no helicity axis: filled with `nominal_weight`, which is what
+# summing the helicity partition of the unfolding hist gives.
+RESPONSE_HIST = "nominal_prefsr_yieldsResponse"
+RESPONSE_GENTOTAL = "prefsr_response"
 DEFAULT_SAMPLE = "Zmumu_2016PostVFP"
 # helicitySig: angular-moment axis; take UL (value -1), the angular-integrated
 # total (see _select_ul_helicity). acceptance sliced True (gen-fiducial) at use.
@@ -85,6 +91,30 @@ def _append_axis_overflow(h, axis_name):
         )
     over = full[tuple(idx)].astype(np.float64)
     return np.concatenate([inr, over], axis=pos)
+
+
+def corr_generator_of(unfolding_hdf5_path):
+    """Name of the theory correction the response grid was taken from, or None.
+
+    The histmaker records its own ``args`` in ``meta_info``; when it ran with
+    ``--responseGenBinning theoryCorr`` the response gen axes ARE the first
+    ``--theoryCorr`` generator's grid, so that name is what a downstream consumer
+    needs to check its binning against (see
+    ``theory_corrections.check_gen_grid_vs_correction``). Returns None when the
+    file does not say, so the check degrades to a no-op rather than an error.
+    """
+    try:
+        with h5py.File(unfolding_hdf5_path, "r") as f:
+            if "meta_info" not in f:
+                return None
+            meta = wums_io.pickle_load_h5py(f["meta_info"])
+        args = (meta.get("meta_info", meta) or {}).get("args", {}) or {}
+        if args.get("responseGenBinning") != "theoryCorr":
+            return None
+        corrs = args.get("theoryCorr") or []
+        return str(corrs[0]) if corrs else None
+    except (OSError, KeyError, TypeError, IndexError, AttributeError):
+        return None
 
 
 def has_response(
@@ -164,7 +194,11 @@ def load_R(
 
         # Sanity-check the axes.
         ax_names = [a.name for a in h.axes]
-        required = set(reco_axes) | set(gen_axes) | {"acceptance", HELICITY_AXIS}
+        # helicitySig is OPTIONAL: the unfolding hist carries the weight
+        # partition and is recovered by summing it, while the parallel response
+        # hist is filled with `nominal_weight` and has no such axis. Both give
+        # the same R.
+        required = set(reco_axes) | set(gen_axes) | {"acceptance"}
         missing = required - set(ax_names)
         if missing:
             raise ValueError(
@@ -184,6 +218,17 @@ def load_R(
         # would discard the angular partition and inflate the closure (~15×).
         h_sel = h[{"acceptance": True}]
         h_proj = h_sel.project(*reco_axes, *gen_axes)
+
+        # The ptVGen overflow is appended as a trailing gen bin [last edge,
+        # PTVGEN_OVERFLOW_EDGE]. On a gen axis that already reaches (or passes)
+        # that edge -- the correction's own grid runs to 100 -- that bin would be
+        # empty-width and meaningless, so drop the overflow instead. What it holds
+        # is then gen qT beyond the correction's range, where the correction file's
+        # flow bins are exactly 1, i.e. events the templates leave uncorrected.
+        if ptVGen_overflow:
+            last_edge = float(h_proj.axes["ptVGen"].edges[-1])
+            if last_edge >= PTVGEN_OVERFLOW_EDGE - 1e-9:
+                ptVGen_overflow = False
 
         # Gen-total denominator N_gen(g): the xnorm histogram (e.g. "postfsr"),
         # filled on fiducial gen events BEFORE reco selection. Its gen marginal
@@ -246,6 +291,7 @@ def load_R(
         reco_shape=reco_shape,
         gen_shape=gen_shape,
         source=(unfolding_hdf5_path, sample_key, hist_name),
+        corr_generator=corr_generator_of(unfolding_hdf5_path),
     )
 
 

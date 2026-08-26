@@ -251,7 +251,10 @@ def main():
     }
 
     if args.proc == "z":
-        eventgen_procs = ["Zmumu", "Zmumu10to50"]
+        eventgen_procs = [
+            "Zmumu",
+            #"Zmumu10to50"
+        ]
         filesByProc = {"Zmumu": args.corrFiles}
     else:
         wpfiles = list(

@@ -130,8 +130,9 @@ Step 3 — σ_reco(λ; b): fold gen → reco through the response matrix
 
 g = gen bin (ptVGen, |Y|), summed over by Σ_g; b = reco bin — the fit channel's
 axes, any prefix subset of the canonical (ptll, yll, cosThetaStarll_quantile,
-phiStarll_quantile) order (e.g. a 2D ptll-yll fit; the embedded 4D R is
-marginalized over the missing axes, see ``_marginalize_R_reco``). P(b | g) is
+phiStarll_quantile) order (e.g. 1D ptll, 2D ptll-yll, or the full 4D; the
+embedded 4D R is marginalized over the missing axes, see
+``_marginalize_R_reco``). P(b | g) is
 the gen→reco map (one
 reco column per gen bin), so σ_reco is σ_gen pushed through the detector; Σ_g is
 ``tf.linalg.matvec(self.R, σ_gen_flat)``. Pure detector folding — no λ_central or
@@ -210,6 +211,7 @@ for Asimov and the default; full-K is for real/toy data. Do NOT enable during th
 fit. Full derivation, GN-vs-full-K, and the exact commands: ``docs/HESSIAN_PLAN.md``.
 """
 
+import re
 from typing import Mapping, Optional
 
 import numpy as np
@@ -218,13 +220,18 @@ import tensorflow as tf
 from rabbit.param_models.param_model import ParamModel
 from wremnants.postprocessing.scetlib_np import btgrid_tf as fz_tf
 from wremnants.postprocessing.scetlib_np import lambda_central as scetlib_lambda_central
+from wremnants.postprocessing.scetlib_np import theory_correction as scetlib_theory_corr
 
 # Physics core (Steps 1–2) lives in :mod:`sigma_gen`; this module is the
 # datacard/rabbit adapter (Steps 3–4), holding a :class:`SigmaGenModel` as
 # ``self.core``. The λ-name tuples, σ_ns builder, and default-btgrid helper are
 # re-exported here for backward compat (older imports referenced them on this
 # module). ``fz_tf`` is still needed for the reco-side tensor dtype (``fz_tf.DTYPE``).
-from wremnants.postprocessing.scetlib_np.params import active_params, param_defaults
+from wremnants.postprocessing.scetlib_np.params import (
+    active_params,
+    const_params,
+    param_defaults,
+)
 from wremnants.postprocessing.scetlib_np.sigma_gen import (  # noqa: F401
     _NONSING_DYTURBO_DEFAULT,
     _NONSING_FO_SING_DEFAULT,
@@ -253,33 +260,49 @@ RATIO_FLOOR_MIN = 1.0e-9
 
 
 def _crop_R_to_fit(R, R_reco_axes, fit_reco_axes, tol=1e-9):
-    """Crop R's trailing reco bins so its reco shape matches the fit.
+    """Crop R's reco bins so its reco shape matches the fit.
 
-    R's reco binning is typically a superset of the fit's (e.g. R has one
-    extra overflow ptll bin past the fit's last edge). For each reco axis,
-    require R's leading edges to match the fit's edges and crop R along that
-    axis to keep only the matching bins.
+    R's reco binning is typically a superset of the fit's. The fit's edges must
+    appear as a *contiguous sub-range* of R's edges, but need not start at R's
+    first edge: a low-side acceptance cut (e.g. ptll>5, an --axlim that drops
+    leading bins) makes the fit an interior slice of an R stored from 0. For
+    each reco axis, locate the offset where R's edges line up with the fit's and
+    crop R to that [offset, offset+nbins) window. offset==0 recovers the old
+    leading-prefix behaviour.
     """
     if len(R_reco_axes) != len(fit_reco_axes):
         raise ValueError(
             f"Reco axis count mismatch: R has {len(R_reco_axes)}, "
             f"fit has {len(fit_reco_axes)}"
         )
+    axis_slices = []
     for (rname, redges), (fname, fedges) in zip(R_reco_axes, fit_reco_axes):
         if rname != fname:
             raise ValueError(f"Reco axis name mismatch: R={rname!r} vs fit={fname!r}")
+        redges = np.asarray(redges)
+        fedges = np.asarray(fedges)
         fnb = len(fedges)
         if len(redges) < fnb:
             raise ValueError(
                 f"Reco axis {rname}: R has {len(redges)-1} bins, fit needs "
                 f"{fnb-1}. R is missing edges."
             )
-        if not np.allclose(redges[:fnb], fedges, atol=tol):
+        # find the offset where the fit's full edge run matches R's edges
+        offset = next(
+            (
+                k
+                for k in range(len(redges) - fnb + 1)
+                if np.allclose(redges[k : k + fnb], fedges, atol=tol)
+            ),
+            None,
+        )
+        if offset is None:
             raise ValueError(
-                f"Reco axis {rname}: leading R edges don't match fit edges. "
-                f"R[:{fnb}]={list(redges[:fnb])} vs fit={list(fedges)}"
+                f"Reco axis {rname}: fit edges are not a contiguous sub-range of "
+                f"R's edges. R={list(redges)} vs fit={list(fedges)}"
             )
-    slices = tuple(slice(0, len(fedges) - 1) for (_, fedges) in fit_reco_axes)
+        axis_slices.append(slice(offset, offset + fnb - 1))
+    slices = tuple(axis_slices)
     # Keep all gen axes (the remaining axes of R).
     slices += (slice(None),) * (R.ndim - len(fit_reco_axes))
     return R[slices]
@@ -291,8 +314,8 @@ def _marginalize_R_reco(R, R_reco_axes, fit_axis_names):
     The datacard embeds R at the canonical reco binning (the full 4D
     ptll/yll/cosThetaStar*/phiStar* grid, see ``params.RECO_AXES``) regardless
     of the fit channel's dimensionality. R(b, g) is a counts response, so the
-    response for a lower-dimensional reco channel (e.g. a 2D ptll-yll fit) is
-    exactly the marginal over the dropped reco axes — sum them out here. Gen
+    response for a lower-dimensional reco channel (e.g. a 1D ptll or 2D ptll-yll
+    fit) is exactly the marginal over the dropped reco axes — sum them out here. Gen
     axes (the trailing axes of R) are untouched. The kept axes must appear in
     the fit's order (both follow the canonical ordering, so a mismatch means a
     non-canonical fit channel, which the crop couldn't handle either).
@@ -393,8 +416,8 @@ class SCETlibNPParamModel(ParamModel):
         poi_params: Optional[tuple] = (),
         priors: bool = False,
         prior_sigmas: Optional[Mapping] = None,
-        nonsingular_fo_sing: str = _NONSING_FO_SING_DEFAULT,
-        nonsingular_dyturbo: str = _NONSING_DYTURBO_DEFAULT,
+        nonsingular_fo_sing: Optional[str] = None,
+        nonsingular_dyturbo: Optional[str] = None,
         nonsingular_qt_cutoff: float = 1.0,
         xparam_default: Optional[str] = None,
         hessian_straightthrough: bool = False,
@@ -520,11 +543,15 @@ class SCETlibNPParamModel(ParamModel):
             validate the fit form against a matching SCETlib reference before
             trusting results, and ``lambda6_nu`` (the tanh_6 b⁶ coefficient) is a
             normal fittable λ (default 0, inert under tanh_2).
+            ``tanh_6_abs`` is the DAMPING-FOLD form (``btgrid_tf.abs_fold_tf``):
+            identical to tanh_6 on the whole physical region, but F_eff ≤ e^margin
+            / γ_ν ≤ margin for ANY λ, so it needs no ``NPDampingWall``. Its
+            ``abs_margin`` / ``abs_margin_nu`` are shape CONSTANTS and must be
+            frozen (enforced by :meth:`_check_shape_constants`); the fold makes the
+            prediction physical, NOT the λ, so read the postfit fold-activity
+            diagnostic before calling a folded tune "physical".
         """
         self.indata = indata
-
-        if btgrid_dir is None:
-            btgrid_dir = _default_btgrid_dir()
 
         self._check_discrete_np_double_counting()
 
@@ -564,6 +591,37 @@ class SCETlibNPParamModel(ParamModel):
             print(f"  {key} = {value!r}", flush=True)
 
         self.lambda_central_source = lambda_central_source
+
+        # ---- PDF-dependent inputs (btgrid, FO-singular, FO-nonsingular).
+        # nnlo_sing / dyturbo / pdf_set are read from the theory correction the datacard
+        # picked (resolved from its tag in lambda_central); the btgrid — the one input
+        # not recorded in any correction — comes from the pdf_set→btgrid map. Explicit
+        # constructor args win; a standalone construction with no tag falls back to the
+        # CT18Z sigma_gen defaults. See theory_correction.py for the accepted fit-time
+        # CorrZ-read caveat (the FO/singular pieces live nowhere else for now).
+        _tag = (lambda_central or {}).get("tag")
+        if (
+            btgrid_dir is None
+            or nonsingular_fo_sing is None
+            or nonsingular_dyturbo is None
+        ):
+            if _tag is None:
+                if btgrid_dir is None:
+                    btgrid_dir = _default_btgrid_dir()
+                if nonsingular_fo_sing is None:
+                    nonsingular_fo_sing = _NONSING_FO_SING_DEFAULT
+                if nonsingular_dyturbo is None:
+                    nonsingular_dyturbo = _NONSING_DYTURBO_DEFAULT
+            else:
+                _corr_proc = "W" if str(signal_proc).startswith("W") else "Z"
+                _inp = scetlib_theory_corr.read_corr_inputs(_tag, proc=_corr_proc)
+                if nonsingular_fo_sing is None:
+                    nonsingular_fo_sing = _inp["nnlo_sing"]
+                if nonsingular_dyturbo is None:
+                    nonsingular_dyturbo = _inp["dyturbo_fo"]
+                if btgrid_dir is None:
+                    btgrid_dir = scetlib_theory_corr.btgrid_for(_inp["pdf_set"])
+                    scetlib_theory_corr.check_btgrid_pdf(btgrid_dir, _inp["pdf_set"])
 
         # ---- Hessian straight-through switches (module docstring's two-pass
         # recipe). Spec tokens hessian_straightthrough=1 / hessian_gn=1, recorded
@@ -817,6 +875,11 @@ class SCETlibNPParamModel(ParamModel):
                 f"[SCETlibNPParamModel] xparamdefault overridden: {dict(zip(self._param_order, defaults))}",
                 flush=True,
             )
+
+        # ---- Shape constants (params.CONST_PARAMS) must not float. Checked here,
+        # after the start values are final, so the message can quote them.
+        self._check_shape_constants(kwargs.get("freezeParameters"), defaults)
+        self._check_pos_form_preconditions(kwargs.get("freezeParameters"), defaults)
         # rabbit's set_param_default stores POIs (npoi entries) as SQRT(value) if not
         # allowNegativeParam. Our λ can be tiny/zero (delta_lambda2), so default to
         # allowNegativeParam=True: stored value == λ directly.
@@ -956,6 +1019,206 @@ class SCETlibNPParamModel(ParamModel):
             "running both double-counts. Remake the datacard without them "
             "(setupRabbit --excludeNuisances '.*scetlibNP.*'). Conflicting "
             "systs:\n" + "\n".join(f"    {s}" for s in conflicting)
+        )
+
+    def _check_pos_form_values(self, defaults):
+        """The ``*_pos`` forms' own shape constants must be USABLE, not just frozen.
+
+        ``_check_shape_constants`` refuses to FLOAT them; this refuses values that
+        silently break the map:
+
+        * ``pos_floor`` / ``pos_floor_nu`` **must be > 0**. At exactly 0,
+          ``btgrid_tf.pos_floor_tf`` degenerates to ``relu``, whose derivative is
+          EXACTLY 0 on the whole negative side — so a coefficient the data push
+          below zero sits on a dead gradient, the minimiser cannot move it back,
+          and the Hessian row for it is singular. That vanishing-Jacobian failure
+          is the entire reason the map is a smooth floor rather than ``relu``,
+          ``x²`` or ``softplus``, so a floor of 0 throws the form away while
+          keeping its name (and keeps the wall switched off).
+        * ``pos_anchor_Y`` **must be > 0** — it divides.
+
+        Warn (do not raise) if the anchor is below the wall's ``Y_MAX``: λ2_Y is
+        then guaranteed positive over LESS |Y| than the walled runs it will be
+        compared against.
+        """
+        start = dict(zip(self._param_order, [float(v) for v in defaults]))
+        problems = []
+        for name in ("pos_floor", "pos_floor_nu"):
+            if name in start and not start[name] > 0.0:
+                problems.append(
+                    f"{name} = {start[name]:g}, must be > 0 — at 0 the positive map "
+                    "IS relu, whose gradient vanishes identically on the negative "
+                    "side (dead parameter, singular Hessian row). Try 3e-3."
+                )
+        if "pos_anchor_Y" in start and not start["pos_anchor_Y"] > 0.0:
+            problems.append(
+                f"pos_anchor_Y = {start['pos_anchor_Y']:g}, must be > 0 "
+                "(it is the |Y| the λ2_Y anchors are interpolated over)"
+            )
+        if problems:
+            raise ValueError(
+                "[SCETlibNPParamModel] unusable *_pos shape constant(s): "
+                + "; ".join(problems)
+                + ". Set them with --modelArgs xparam_default=name=value "
+                "(and keep them in --freeze)."
+            )
+        anchor = start.get("pos_anchor_Y")
+        if anchor is None:
+            return
+        # Local import: np_damping_wall pulls in rabbit, which this module must not
+        # require (it is constructed by standalone diagnostic scripts too).
+        from wremnants.postprocessing.scetlib_np.np_damping_wall import Y_MAX
+
+        if anchor < Y_MAX:
+            print(
+                f"[SCETlibNPParamModel] WARNING: pos_anchor_Y = {anchor:g} is below "
+                f"np_damping_wall.Y_MAX = {Y_MAX:g}; λ2_Y is "
+                "guaranteed positive over a SMALLER |Y| range than a walled run "
+                "would demand (beyond the anchor λ2_Y is held, not extrapolated).",
+                flush=True,
+            )
+
+    def _check_pos_form_preconditions(self, freeze_expressions, defaults):
+        """``tanh_6_pos`` only guarantees damping under a specific configuration.
+
+        The form maps ``lambda2_nu`` onto (0, ∞), which makes γ_ν ≤ 0 and monotone
+        an IDENTITY **only if the other coefficients of the tanh argument are
+        non-negative too** — i.e. ``lambda4_nu`` frozen at 0 and ``lambda6_nu``
+        frozen ≥ 0. Run any other way and the guarantee is gone, *and*
+        ``np_damping_wall`` has already switched its CS block off because the form
+        is in ``UNCONDITIONAL_FORMS`` — an unconstrained CS side that reads as
+        "structurally physical" in the logs. That combination is worse than either
+        choice alone, so refuse it.
+
+        ``tanh_2_pos`` needs NO such precondition on either side: tanh_2 has no b⁶
+        term, so mapping the CS λ2_ν / λ4_ν and the TMD λ2_Y / B covers every
+        coefficient of both tanh arguments, for any λ. Only its shape constants
+        are checked (:meth:`_check_pos_form_values`).
+
+        Same ``freeze_expressions`` contract as :meth:`_check_shape_constants`:
+        ``None`` means a standalone (non-rabbit) construction, where only the
+        values are checked.
+        """
+        self._check_pos_form_values(defaults)
+        if self._np_model_nu_fit != "tanh_6_pos":
+            return
+        start = dict(zip(self._param_order, [float(v) for v in defaults]))
+
+        problems = []
+        if start.get("lambda4_nu", 0.0) != 0.0:
+            problems.append(
+                f"lambda4_nu = {start['lambda4_nu']:g}, must start at 0 "
+                "(a negative b⁴ coefficient can pull the argument negative)"
+            )
+        if start.get("lambda6_nu", 0.0) < 0.0:
+            problems.append(
+                f"lambda6_nu = {start['lambda6_nu']:g}, must be ≥ 0 "
+                "(it is the leading large-b_T coefficient)"
+            )
+        if freeze_expressions is not None:
+            for name in ("lambda4_nu", "lambda6_nu"):
+                if name not in self._param_order:
+                    continue
+                if not any(
+                    name == expr or re.fullmatch(expr, name)
+                    for expr in freeze_expressions
+                ):
+                    problems.append(f"{name} would FLOAT, must be frozen")
+        if not problems:
+            return
+        raise ValueError(
+            "[SCETlibNPParamModel] np_model_nu_fit='tanh_6_pos' guarantees a "
+            "damping, monotone γ_ν only with lambda4_nu frozen at 0 and "
+            "lambda6_nu frozen ≥ 0, and np_damping_wall switches its CS block OFF "
+            "for this form. Violations: "
+            + "; ".join(problems)
+            + ". Fix with e.g. --freeze 'lambda4_nu' 'lambda6_nu' and "
+            "--modelArgs xparam_default=lambda4_nu=0,lambda6_nu=0.01 — or use "
+            "np_model_nu_fit='tanh_6' with the wall if you want lambda4_nu free."
+        )
+
+    def _check_shape_constants(self, freeze_expressions, defaults):
+        """Refuse to FLOAT a fit form's shape constants (``params.CONST_PARAMS``).
+
+        These registry entries say which function the form IS, not what the NP
+        physics is, and each of them relaxes its form monotonically:
+        ``abs_margin`` → ∞ unfolds ``tanh_6_abs`` back to plain ``tanh_6`` (i.e.
+        deletes the very guarantee the fold exists for), ``bT_cutoff`` → ∞ removes
+        the ``tanh_6_sigmoid`` turn-off. A minimiser handed that freedom takes it,
+        and the run then reports a fit to a different model than the one named.
+
+        ``freeze_expressions`` is rabbit's ``--freezeParameters`` list, which
+        ``load_models`` forwards into this constructor's ``**kwargs``. Absent
+        (``None``) means we are not inside a rabbit fit at all (a standalone
+        diagnostic construction), so there is nothing to freeze — only the value
+        is checked. For the ``*_abs`` fold, ``margin < 0`` is rejected outright: the
+        margin is the ALLOWED EXCURSION of the form factor (F_eff ≤ 1 + abs_margin,
+        γ_ν ≤ abs_margin_nu), so a negative one would force F_eff ≤ 1 − |m| at every
+        b_T, including b_T → 0 where F_eff must be 1 (``btgrid_tf.abs_fold_tf``).
+
+        HARD ERROR for the ``*_abs`` margins (nothing pre-existing uses them);
+        WARNING for the older sigmoid constants, whose "freeze them" contract was
+        documentation-only until now.
+        """
+        consts = const_params(
+            np_model=self._np_model_fit, np_model_nu=self._np_model_nu_fit
+        )
+        if not consts:
+            return
+        start = dict(zip(self._param_order, [float(v) for v in defaults]))
+        print(
+            "[SCETlibNPParamModel] fit-form shape constants: "
+            + ", ".join(f"{p}={start[p]:g}" for p in self._param_order if p in consts),
+            flush=True,
+        )
+
+        margins = sorted(p for p in consts if p.startswith("abs_margin"))
+        negative = [p for p in margins if start[p] < 0.0]
+        if negative:
+            raise ValueError(
+                "[SCETlibNPParamModel] the *_abs damping fold needs margin ≥ 0; got "
+                + ", ".join(f"{p}={start[p]:g}" for p in negative)
+                + ". The margin is the ALLOWED EXCURSION of the form factor "
+                "(F_eff ≤ 1 + abs_margin, γ_ν ≤ abs_margin_nu), so a negative one "
+                "forces F_eff ≤ 1 − |margin| at every b_T — including b_T → 0, "
+                "where F_eff must be 1 — instead of capping the anti-damping."
+            )
+
+        if freeze_expressions is None:
+            return  # not a rabbit fit: no freeze list to check
+        frozen = set()
+        for name in consts:
+            for expr in freeze_expressions:
+                if name == expr or re.fullmatch(expr, name):
+                    frozen.add(name)
+                    break
+        floating = sorted(consts - frozen)
+        if not floating:
+            return
+        how = (
+            "Add them to --freezeParameters (fitterSCETlibNP.py: --freeze, or its "
+            "DEFAULT_FREEZE) and set the value with the model token "
+            "xparam_default=" + ",".join(f"{p}={start[p]:g}" for p in floating) + "."
+        )
+        # The pos_* constants are hard too: each floor is EXACTLY degenerate with
+        # the coefficient it maps in the region where the map is the identity (both
+        # just shift it), so floating one buys no physics and wrecks the Hessian;
+        # pos_anchor_Y reshapes the Y-dependence itself.
+        hard = [
+            p for p in floating if p.startswith("abs_margin") or p.startswith("pos_")
+        ]
+        if hard:
+            raise ValueError(
+                f"[SCETlibNPParamModel] shape constant(s) {hard} would FLOAT in this "
+                f"fit (forms {self._np_model_fit}/{self._np_model_nu_fit}). The fit "
+                "would grow the margin without bound — an unbounded margin is an "
+                "unfolded tanh_6, i.e. no damping guarantee at all. " + how
+            )
+        print(
+            f"[SCETlibNPParamModel] WARNING: shape constant(s) {floating} are "
+            f"FLOATING; they select the functional form, so the fit will reshape "
+            f"the model instead of measuring NP. " + how,
+            flush=True,
         )
 
     def _fit_reco_axes(self, indata):

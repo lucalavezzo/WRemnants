@@ -259,11 +259,12 @@ def read_nnlojet_file(
         axes.append(var_ax)
 
     h = hist.Hist(*axes, storage=hist.storage.Weight())
-    # Switch y and pT order
+    # Switch y and pT order.  With all_scales=False keep only the central (value, err)
+    # pair (cols 3,4), so central-only reads work even on files that carry the full
+    # 7-scale set (e.g. a member0 symlinked to the nominal).
+    vals = data[:, 3:] if all_scales else data[:, 3:5]
     ax_idx = len(other_axes)
-    res = data[:, 3:].reshape(
-        h.shape[ax_idx], *h.shape[:ax_idx], *h.shape[ax_idx + 1 :], 2
-    )
+    res = vals.reshape(h.shape[ax_idx], *h.shape[:ax_idx], *h.shape[ax_idx + 1 :], 2)
     h[...] = np.moveaxis(res, 0, ax_idx)
 
     # Text file stores errors, convert to variance
@@ -297,12 +298,13 @@ def resolve_nnlojet_ybin_filename(refname, ybins):
     return candidates[0]
 
 
-def read_nnlojet_ybin(refname, ybins, charge=None):
+def read_nnlojet_ybin(refname, ybins, charge=None, all_scales=True):
     yax = hist.axis.Variable(ybins, name="Y")
     return read_nnlojet_file(
         resolve_nnlojet_ybin_filename(refname, ybins),
         other_axes=[yax],
         charge=charge,
+        all_scales=all_scales,
     )
 
 
@@ -313,16 +315,45 @@ def read_nnlojet_pty_hist(
         np.array((4.0, 5.0)),
     ),
     charge=None,
+    all_scales=True,
 ):
 
-    h = read_nnlojet_ybin(reffile, ybins[:2], charge=charge)
+    h = read_nnlojet_ybin(reffile, ybins[:2], charge=charge, all_scales=all_scales)
 
     for pair in zip(ybins[1:-1], ybins[2:]):
         h = hh.concatenateHists(
-            h, read_nnlojet_ybin(reffile, pair, charge=charge), allowBroadcast=False
+            h,
+            read_nnlojet_ybin(reffile, pair, charge=charge, all_scales=all_scales),
+            allowBroadcast=False,
         )
 
     return h
+
+
+def read_nnlojet_vars_hist(base_name, var_axis, ybins=None, charge=None):
+    # Read one *central-scale* NNLOjet prediction per variation and stack them on
+    # the vars axis, mirroring read_dyturbo_vars_hist.  base_name carries an "{i}"
+    # placeholder for the member index; each member file is central-scale only
+    # (single value+error per bin, i.e. all_scales=False).  Used e.g. for synthetic
+    # alpha_s variations generated in the NNLOjet text format.  ybins defaults to the
+    # NNLOjet native y-binning; read_matched_scetlib_hist rebins to the common grid.
+    ybin_kw = {} if ybins is None else {"ybins": ybins}
+    var_hist = None
+    for i, var in enumerate(var_axis):
+        if var.startswith("pdf"):
+            index = var.removeprefix("pdf")
+            pdf_member = int(index) if index.isnumeric() else i
+        else:
+            pdf_member = 0
+        nnlojet_name = base_name.format(i=pdf_member)
+        h = read_nnlojet_pty_hist(
+            nnlojet_name, charge=charge, all_scales=False, **ybin_kw
+        )
+        if var_hist is None:
+            var_hist = hist.Hist(*h.axes, var_axis, storage=h.storage_type())
+        var_hist[..., i] = h.view()
+
+    return var_hist
 
 
 def read_dyturbo_hist(
@@ -605,10 +636,16 @@ def read_matched_scetlib_nnlojet_hist(
     if not axes:
         axes = hresum.axes[:-1].name
 
-    if "Y" in axes and "qT" in axes:
-        nnlojeth = read_nnlojet_pty_hist(
-            nnlojet_fo, ybins=hresum.axes["Y"].edges, charge=charge
+    # Read the NNLOjet FO at its native y-binning (not the resummation's edges):
+    # read_matched_scetlib_hist rebins Y/Q/qT to the common intersection, so a coarser
+    # NNLOjet input matches a finer SCETlib resummation without interpolation.
+    nnlojet_vars = "{i}" in nnlojet_fo and hfo_sing.axes["vars"].size > 1
+    if nnlojet_vars:
+        nnlojeth = read_nnlojet_vars_hist(
+            nnlojet_fo, var_axis=hfo_sing.axes["vars"], charge=charge
         )
+    elif "Y" in axes and "qT" in axes:
+        nnlojeth = read_nnlojet_pty_hist(nnlojet_fo, charge=charge)
     else:
         nnlojeth = read_nnlojet_file(nnlojet_fo, axnames=axes, charge=charge)
 

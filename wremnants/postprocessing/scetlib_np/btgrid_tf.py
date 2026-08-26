@@ -23,10 +23,10 @@ import tensorflow as tf
 # The form branches below must read exactly the λ each model lists in the params
 # registry (EFF_MODEL_PARAMS / GNU_MODEL_PARAMS).
 from wremnants.postprocessing.scetlib_np.params import (
-    EFF_MODELS,
-    GNU_MODELS,
     _EFF_MODEL_ALIASES,
     _GNU_MODEL_ALIASES,
+    EFF_MODELS,
+    GNU_MODELS,
 )
 
 # float64 throughout this module.
@@ -125,6 +125,77 @@ def _safe_div(num, den):
     return num / den_safe
 
 
+def abs_fold_tf(x, margin):
+    """The ``*_abs`` damping fold: ``|x + m| - m`` (m = ``margin`` ≥ 0).
+
+    Applied to the DAMPING EXPONENT of each NP form factor — ``2·λ∞·b_T·tanh(a)``
+    for F_eff, ``λ∞_ν·tanh(a)`` for γ_ν^NP — so the folded quantity is ≥ −m
+    whatever the λ do. ``m`` here is in EXPONENT units; the callers express the
+    margin as the allowed EXCURSION OF THE FUNCTION and convert, so what a user
+    sets is what the function is capped at:
+
+        F_eff = exp(−fold(2·λ∞·b_T·tanh a, ln(1+`abs_margin`)))
+                                             ≤  1 + `abs_margin`
+        γ_ν   = −fold(λ∞_ν·tanh a, `abs_margin_nu`)
+                                             ≤  `abs_margin_nu`
+
+    i.e. exactly the ``F_eff ≤ 1.2`` / ``γ_ν ≤ 0.2`` style cap the (deleted, soft,
+    grid-sampled) ``NPFunctionBound`` regularizer tried to impose — here as an
+    identity instead of a penalty, so there is no threshold to rail against.
+
+    Both hold for EVERY λ, including λ∞ of either sign, and UNIFORMLY in b_T. That
+    uniformity is why the fold sits on the exponent and not on the tanh argument: a
+    margin in argument units buys anti-damping ∝ exp(2·λ∞·b_T·tanh m), i.e. more
+    and more as b_T grows (to 50 GeV⁻¹ on our grid). At m = 0 the two are the SAME
+    function — b_T, λ∞ > 0 give |2λ∞b·tanh a| = 2λ∞b·tanh|a|.
+
+    Identity where ``x ≥ −m``: on the whole physical (damping) region the folded
+    form IS its unfolded parent — and BIT-EXACTLY so, because that branch returns
+    ``x`` itself rather than the algebraically-equal ``(x + m) - m``, whose round
+    trip through the offset costs low bits at m > 0. ``fold(0) = 0`` for any m ≥ 0,
+    so F_eff(b_T→0) → 1 and a λ∞ = 0 (NP-off) point is untouched. m < 0 would break
+    that (it would force F_eff ≤ 1 − |m| everywhere, F_eff(0) ≠ 1) and is
+    rejected where the margin enters the fit (``_check_shape_constants``).
+
+    The branch is a ``tf.where`` on a gradient-FROZEN condition rather than
+    ``tf.abs``: the value and the one-sided derivative are identical, but no
+    ``Abs``/``Sign`` op enters the nested forward-over-forward Hessian path, whose
+    per-op JVP support is where the full-K crash of :func:`_frozen_eq_zero` came
+    from. The kink at ``x = −m`` is a measure-zero set in b_T; the b_T-integral
+    smooths it in λ (a λ-derivative that ``tf.abs`` would report as 0 exactly at
+    the kink is reported as the right-hand value here)."""
+    m = _as_dtype(margin)
+    reflected = -x - m - m  # = |x + m| - m on the x < -m side
+    return tf.where(tf.greater_equal(tf.stop_gradient(x + m), 0), x, reflected)
+
+
+# Floor on the sigmoid turn-off width, so bT_cutoff_width -> 0 degrades to the
+# (correct) step-function limit instead of a silently-wrong unit-width sigmoid.
+SIGMOID_WIDTH_FLOOR = 1e-6
+
+
+def sigmoid_cutoff_tf(bT, values):
+    """Large-b_T turn-off factor S(b_T) = 1 / (1 + exp((b_T - b_cut)/w)).
+
+    The extra factor ``tanh_6_sigmoid`` carries: 1 below ``bT_cutoff``, 0 above it,
+    switching over ~``bT_cutoff_width``. Pushing ``bT_cutoff`` out at FIXED width
+    gives S == 1 bit-exactly (the argument saturates float64 past ~36.7), which is
+    how the model reduces to bare ``tanh_6``; raising BOTH does not — only their
+    ratio enters, so e.g. b_cut = w = 1e4 leaves a flat S ≈ 0.731.
+
+    NOT normalised to S(0) = 1: with the defaults (b_cut = 2, w = 0.2) S(0) =
+    1 - 5e-5, but a wide/low cutoff pulls F_eff(0) below 1 by S(0) — visible in the
+    plotted curve on purpose rather than hidden by a rescale.
+
+    ``values`` supplies ``bT_cutoff`` and ``bT_cutoff_width`` [both GeV^-1];
+    missing ones raise ``KeyError`` like every other λ. Differentiable in both."""
+    bT = _as_dtype(bT)
+    b_cut = _as_dtype(values["bT_cutoff"])
+    width = _as_dtype(values["bT_cutoff_width"])
+    width = tf.maximum(width, _as_dtype(SIGMOID_WIDTH_FLOOR))
+    return tf.sigmoid(-(bT - b_cut) / width)
+
+
 def F_eff_tf(Y, bT, values, *, np_model):
     """TMD-effective NP form factor F_eff(Y, bT) for a fixed ``np_model``.
 
@@ -132,7 +203,11 @@ def F_eff_tf(Y, bT, values, *, np_model):
     float). Each ``np_model`` branch reads ONLY the λ its formula uses — a missing
     one raises ``KeyError`` (fail out; no fabricated default). Extra keys (e.g.
     ``np_model``) are ignored. The λ each model reads is declared in
-    :data:`params.EFF_MODEL_PARAMS`; keep the two in sync."""
+    :data:`params.EFF_MODEL_PARAMS`; keep the two in sync.
+
+    ``tanh_6_abs`` is ``tanh_6`` with its damping exponent folded through
+    :func:`abs_fold_tf`: F_eff ≤ 1 + ``abs_margin`` for every λ, and identically
+    tanh_6 wherever F_eff ≤ 1 + ``abs_margin`` already holds pointwise."""
     if np_model not in EFF_MODELS:
         raise ValueError(f"F_eff_tf: unsupported np_model {np_model!r}")
 
@@ -142,6 +217,16 @@ def F_eff_tf(Y, bT, values, *, np_model):
     lambda4 = _as_dtype(values["lambda4"])
     delta_lambda2 = _as_dtype(values["delta_lambda2"])
     lambda2_Y = lambda2 + delta_lambda2 * Y * Y
+
+    model = _EFF_MODEL_ALIASES.get(np_model, np_model)
+    if model == "tanh_2_pos":
+        # Structural positivity, part 1 of 2: λ2_Y ≥ pos_floor for every
+        # |Y| ≤ pos_anchor_Y, WITHOUT breaking its linearity in Y²
+        # (:func:`pos_anchor_lambda2_Y_tf`). Applied HERE, before λ2_Y reaches
+        # ``arg`` and the B combination below, so both see the mapped value.
+        lambda2_Y = pos_anchor_lambda2_Y_tf(
+            lambda2, delta_lambda2, Y, values["pos_floor"], values["pos_anchor_Y"]
+        )
 
     if np_model == "signed_lambda":
         return (1.0 + lambda2_Y * bT**2) ** 2 * tf.exp(-2.0 * lambda4 * bT**4)
@@ -155,16 +240,42 @@ def F_eff_tf(Y, bT, values, *, np_model):
     # denominator, mask at the end.
     lambda_inf = _as_dtype(values["lambda_inf"])
     arg_inf = _safe_div(arg, lambda_inf)
-    model = _EFF_MODEL_ALIASES.get(np_model, np_model)
+    cutoff = False
+    fold = False
 
     if model == "tanh_2":
         a = arg_inf + (1.0 / 3.0) * _safe_div(lambda2_Y * bT, lambda_inf) ** 3
         func = tf.tanh(a)
-    elif model == "tanh_6":
+    elif model == "tanh_2_pos":
+        # Structural positivity, part 2 of 2. tanh_2's TMD damping condition is
+        # NOT "every λ ≥ 0". Writing the argument as
+        #     a·λ∞ = b·(λ2_Y + B·b²) ,   B = λ4 + λ2_Y³/(3·λ∞²)
+        # what must be non-negative is λ2_Y (part 1) and the COMBINATION B — λ4
+        # itself may sit negative while λ2_Y³/(3λ∞²) carries B. So mapping λ4
+        # positive would be STRICTER than physical and would delete allowed
+        # parameter space (and bias α_s by construction); mapping B is EXACTLY
+        # ``np_damping_wall``'s tanh_2 TMD condition, turned into an identity.
+        #   With λ2_Y ≥ 0 and B ≥ 0 the argument is a b-polynomial with
+        # non-negative coefficients, hence a ≥ 0 and increasing in b; λ·tanh(c/λ)
+        # is EVEN in λ, so the damping exponent 2λ∞·b·tanh(a) ≥ 0 — F_eff ≤ 1 for
+        # ANY λ INCLUDING either sign of λ∞ (monotone decreasing in b_T too, for
+        # λ∞ > 0). No wall, no margin, no boundary.
+        #   Algebraically identical to the tanh_2 branch above wherever the two
+        # maps are the identity — expand B and the b³ terms recombine into
+        # ``arg_inf + (λ2_Y·b/λ∞)³/3``.
+        B = lambda4 + (1.0 / 3.0) * lambda2_Y * _safe_div(lambda2_Y, lambda_inf) ** 2
+        B = pos_floor_tf(B, values["pos_floor"])
+        a = _safe_div((lambda2_Y + B * bT * bT) * bT, lambda_inf)
+        func = tf.tanh(a)
+    elif model in ("tanh_6", "tanh_6_sigmoid", "tanh_6_abs"):
         lambda6 = _as_dtype(values["lambda6"])
         a = arg_inf + _safe_div(lambda6 * bT**5, lambda_inf)
         a = a + (1.0 / 3.0) * _safe_div(lambda2_Y * bT, lambda_inf) ** 3
         func = tf.tanh(a)
+        # tanh_6_sigmoid: same form, times the large-bT turn-off applied at the end.
+        cutoff = model == "tanh_6_sigmoid"
+        # tanh_6_abs: same form, damping exponent folded to ≥ −abs_margin.
+        fold = model == "tanh_6_abs"
     elif model == "tanh_4":
         func = tf.sqrt(tf.tanh(arg_inf**2))
     elif model == "frac_2":
@@ -180,10 +291,108 @@ def F_eff_tf(Y, bT, values, *, np_model):
     else:  # pragma: no cover — guarded above
         raise ValueError(f"F_eff_tf: unsupported np_model {np_model!r}")
 
-    full = tf.exp(-2.0 * lambda_inf * bT * func)
+    damping = 2.0 * lambda_inf * bT * func
+    if fold:
+        # tanh_6_abs: fold the exponent ⇒ F_eff ≤ 1 + abs_margin for ANY λ. The
+        # margin is the allowed FRACTIONAL EXCURSION of F_eff (abs_margin=0.2 ⇒
+        # F_eff ≤ 1.2), so it enters the exponent-space fold as ln(1+margin).
+        damping = abs_fold_tf(damping, tf.math.log1p(_as_dtype(values["abs_margin"])))
+    full = tf.exp(-damping)
     # lambda_inf == 0 -> 1 (NP off); frozen comparison input (see
-    # _frozen_eq_zero) for the full-K @tf.function Hessian.
-    return tf.where(_frozen_eq_zero(lambda_inf), tf.ones_like(full), full)
+    # _frozen_eq_zero) for the full-K @tf.function Hessian. (The fold leaves this
+    # alone: fold(0) == 0, so the folded forms are 1 at lambda_inf == 0 anyway.)
+    out = tf.where(_frozen_eq_zero(lambda_inf), tf.ones_like(full), full)
+    if cutoff:
+        out = out * sigmoid_cutoff_tf(bT, values)
+    return out
+
+
+def pos_floor_tf(x, floor):
+    """Smooth, MONOTONE map onto (0, ∞):  ``(x + sqrt(x² + 4·floor²)) / 2``.
+
+    Used by the ``tanh_6_pos`` CS form to make a tanh-argument coefficient
+    strictly positive without a wall and without a boundary.
+
+    Properties (``floor`` = f ≥ 0):
+
+    * **strictly positive** for every real ``x`` — the point of the map;
+    * **identity where it matters**: for x ≫ f it is x to O(f²/x) (at f = 3e-3,
+      x = 0.1 the error is 0.09%), so a physical tune is the plain tanh_6 tune,
+      exactly as ``abs_fold_tf`` reduces to tanh_6 on the damping region;
+    * **monotone**, dy/dx = ½(1 + x/√(x²+4f²)) ∈ (0, 1), so — unlike the EVEN
+      ``abs_fold_tf`` — there is **no x → −x mirror degeneracy**. That degeneracy
+      is what made the *_abs fold unusable at margin 0;
+    * **gradient never vanishes** (dy/dx > 0 for finite x), unlike x² or exp(x)
+      reparametrizations whose Jacobian collapses at the boundary;
+    * y(0) = f, and y → f²/|x| → 0⁺ as x → −∞: a fit that wants a negative
+      coefficient gets the "coefficient ≈ 0" prediction, on a flat but
+      differentiable plateau. **The postfit value is then not meaningful — read
+      it as "the fit wants ≤ 0" and check the sign, not the magnitude.**
+
+    ``floor`` is a SHAPE CONSTANT (``params.CONST_PARAMS``): raising it changes
+    the model, so the param model requires it frozen.
+    """
+    # x = _as_dtype(x)
+    # floor = _as_dtype(floor)
+    # return 0.5 * (x + tf.sqrt(x * x + 4.0 * floor * floor))
+    return tf.math.softplus(x)
+
+
+def pos_anchor_lambda2_Y_tf(lambda2, delta_lambda2, Y, floor, anchor_Y):
+    """λ2_Y(Y) > 0 on |Y| ≤ ``anchor_Y``, STILL LINEAR IN Y².
+
+    The TMD-side counterpart of :func:`pos_floor_tf`, for the one coefficient
+    whose positivity CANNOT be imposed parameter-by-parameter: λ2_Y = λ2 +
+    δλ2·Y² has to be ≥ 0 over a RANGE of Y, which is a joint condition on two λ.
+    δλ2 < 0 is perfectly physical — the external MAP22 / lattice tunes have it —
+    as long as λ2_Y has not gone negative yet, so mapping δλ2 itself positive
+    would be WRONG PHYSICS rather than a tighter constraint.
+
+    Instead map the two ANCHORS of the line through :func:`pos_floor_tf` and
+    re-interpolate linearly in Y²:
+
+        λ2_Y(Y) = L₀ + (L_A − L₀)·min(Y²/anchor_Y², 1)
+        L₀ = pos(λ2, floor) ,   L_A = pos(λ2 + δλ2·anchor_Y², floor)
+
+    Two properties, both wanted:
+
+    * **positive**: a linear interpolation between two positive numbers is
+      ≥ min(L₀, L_A) > 0 on the whole interval — for ANY (λ2, δλ2);
+    * **still a tanh_2**: the result is still linear in Y², so the effective form
+      is the parent form at some other (λ2′, δλ2′), not a shape ``tanh_2`` cannot
+      produce. That is the advantage over the simpler alternative of applying
+      :func:`pos_floor_tf` to λ2_Y pointwise in Y, which is also positive but
+      KINKS the Y-dependence as soon as the raw line crosses zero.
+
+    IDENTITY wherever both anchors are already comfortably positive, i.e. on the
+    whole physical region — so a physical tune is the plain ``tanh_2`` tune and a
+    card closure / λ-response validated under ``tanh_2`` carries over, the same
+    reduction property :func:`pos_floor_tf` and :func:`abs_fold_tf` have.
+
+    OUTSIDE ``anchor_Y`` the interpolation variable is CLAMPED at 1: λ2_Y is HELD
+    at its ``anchor_Y`` value, not extrapolated. Deliberate, and the same argument
+    ``np_damping_wall.Y_MAX`` was moved 5.0 → 2.5 for on 2026-08-05 — the
+    Y-parametrization is a mapping of an external tune fitted on |Y| ≤ 2.5 only,
+    the analysis measures |Y| ≤ 2.5, and a downward parabola continued past its
+    fit range must eventually cross zero. Freezing the extrapolation keeps EVERY
+    gen bin's b_T integral damping, including the |Y| > 2.5 bins that sit on the
+    grid but outside acceptance; letting the line continue would hand those bins
+    straight back to the anti-damping region this map exists to remove. The kink
+    is in Y, at |Y| = anchor_Y — not in b_T, and not in λ.
+
+    ``floor`` and ``anchor_Y`` are SHAPE CONSTANTS (``params.CONST_PARAMS``): the
+    param model requires them frozen, and ``anchor_Y`` must be > 0.
+    """
+    Y = _as_dtype(Y)
+    anchor_Y2 = _as_dtype(anchor_Y) ** 2
+    L0 = pos_floor_tf(lambda2, floor)
+    LA = pos_floor_tf(_as_dtype(lambda2) + _as_dtype(delta_lambda2) * anchor_Y2, floor)
+    t = _safe_div(Y * Y, anchor_Y2)
+    # Clamp at 1 through a gradient-FROZEN condition rather than tf.minimum: same
+    # value and same one-sided derivative, but no Minimum op in the nested
+    # forward-over-forward Hessian path (see :func:`_frozen_eq_zero`).
+    t = tf.where(tf.greater(tf.stop_gradient(t), 1.0), tf.ones_like(t), t)
+    return L0 + (LA - L0) * t
 
 
 def gamma_nu_NP_tf(bT, values, *, np_model_nu):
@@ -193,6 +402,10 @@ def gamma_nu_NP_tf(bT, values, *, np_model_nu):
     (a missing one raises ``KeyError`` — fail out). Extra keys (e.g.
     ``np_model_nu``) are ignored. The λ each model reads is declared in
     :data:`params.GNU_MODEL_PARAMS`; keep the two in sync.
+
+    ``tanh_6_abs`` is ``tanh_6`` with its damping magnitude folded through
+    :func:`abs_fold_tf`: γ_ν ≤ ``abs_margin_nu`` for every λ, and identically
+    tanh_6 wherever γ_ν ≤ ``abs_margin_nu`` already holds pointwise.
     """
     if np_model_nu not in GNU_MODELS:
         raise ValueError(f"gamma_nu_NP_tf: unsupported np_model_nu {np_model_nu!r}")
@@ -202,21 +415,51 @@ def gamma_nu_NP_tf(bT, values, *, np_model_nu):
     lambda2_nu = _as_dtype(values["lambda2_nu"])
     lambda4_nu = _as_dtype(values["lambda4_nu"])
 
+    model = _GNU_MODEL_ALIASES.get(np_model_nu, np_model_nu)
+
+    if model == "tanh_6_pos":
+        # Structurally damping: push the b² coefficient onto (0, ∞) BEFORE it
+        # enters the argument. With lambda4_nu frozen at 0 and lambda6_nu frozen
+        # ≥ 0 every coefficient of `a` is then non-negative, so a ≥ 0 and
+        # da/db_T ≥ 0 hold identically ⇒ γ_ν ≤ 0 and monotone for ANY lambda2_nu,
+        # with no wall term and no boundary. (lambda4_nu is still read and still
+        # enters, so the form is well defined if it is floated — but then the
+        # guarantee is only the usual conditional one and the wall is needed
+        # again; that is why the model card says to freeze it.)
+        lambda2_nu = pos_floor_tf(lambda2_nu, values["pos_floor_nu"])
+    elif model == "tanh_2_pos":
+        # tanh_2's CS damping condition IS per-λ positivity — np_damping_wall's
+        # tanh_2 CS block is exactly λ2_ν ≥ 0, λ4_ν ≥ 0 — so mapping BOTH through
+        # pos_floor_tf reproduces its feasible set EXACTLY: nothing is left to
+        # constrain, and there is no precondition on any other λ (contrast
+        # tanh_6_pos, which needs λ4_ν frozen at 0 because its b⁶ term reopens the
+        # question). λ∞_ν needs no condition either: λ·tanh(P/λ) is EVEN in λ, so
+        # P ≥ 0 alone gives γ_ν ≤ 0 for EITHER SIGN of λ∞_ν — which is worth
+        # knowing, since the grid config records λ∞_ν = −2 while the fits run +2.
+        floor = values["pos_floor_nu"]
+        lambda2_nu = pos_floor_tf(lambda2_nu, floor)
+        lambda4_nu = pos_floor_tf(lambda4_nu, floor)
+
     bT2 = bT * bT
     arg = _safe_div((lambda2_nu + lambda4_nu * bT2) * bT2, lambda_inf_nu)
 
-    model = _GNU_MODEL_ALIASES.get(np_model_nu, np_model_nu)
+    fold = False
 
     if model == "tanh_1":
         a = arg + (2.0 / 3.0) * _safe_div(lambda2_nu * bT2, lambda_inf_nu) ** 2
         func = tf.tanh(tf.sqrt(a)) ** 2
-    elif model == "tanh_2":
+    elif model in ("tanh_2", "tanh_2_pos"):
+        # Same formula; tanh_2_pos differs only in the positive maps applied to
+        # lambda2_nu / lambda4_nu above, before they entered ``arg``.
         func = tf.tanh(arg)
-    elif model == "tanh_6":
+    elif model in ("tanh_6", "tanh_6_abs", "tanh_6_pos"):
         # tanh_2 plus a b⁶ term with fittable coefficient lambda6_nu.
+        # tanh_6_pos differs only in that lambda2_nu was mapped positive above.
         lambda6_nu = _as_dtype(values["lambda6_nu"])
         a = arg + _safe_div(lambda6_nu * bT2**3, lambda_inf_nu)
         func = tf.tanh(a)
+        # tanh_6_abs: same form, damping magnitude folded to ≥ −abs_margin_nu.
+        fold = model == "tanh_6_abs"
     elif model == "frac_1":
         a = arg + _safe_div(lambda2_nu * bT2, lambda_inf_nu) ** 2
         func = a / (1.0 + a)
@@ -230,9 +473,16 @@ def gamma_nu_NP_tf(bT, values, *, np_model_nu):
     else:  # pragma: no cover
         raise ValueError(f"gamma_nu_NP_tf: unsupported np_model_nu {np_model_nu!r}")
 
-    full = -lambda_inf_nu * func
+    damping = lambda_inf_nu * func
+    if fold:
+        # tanh_6_abs: fold the damping magnitude ⇒ γ_ν ≤ abs_margin_nu for ANY λ.
+        # γ_ν's cap is additive (γ_ν ≤ 0.2 style), so the margin IS the fold offset
+        # — no conversion, unlike F_eff's multiplicative 1 + abs_margin.
+        damping = abs_fold_tf(damping, values["abs_margin_nu"])
+    full = -damping
     # lambda_inf_nu == 0 -> 0 (NP off); frozen comparison input (see
-    # _frozen_eq_zero) for the full-K @tf.function Hessian.
+    # _frozen_eq_zero) for the full-K @tf.function Hessian. (The fold leaves this
+    # alone: fold(0) == 0, so the folded form is 0 at lambda_inf_nu == 0 anyway.)
     return tf.where(_frozen_eq_zero(lambda_inf_nu), tf.zeros_like(full), full)
 
 

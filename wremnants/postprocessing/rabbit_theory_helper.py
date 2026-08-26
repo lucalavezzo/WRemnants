@@ -1291,10 +1291,13 @@ class TheoryHelper(object):
         pdfs = self.datagroups.args_from_metadata("pdfs")
         theory_corrs = self.datagroups.args_from_metadata("theoryCorr")
 
+        # TODO this needs to be cleaned up
         corrs_oldnp = ["scetlib_dyturboMSHT20mcrange", "scetlib_dyturboMSHT20mcrange"]
         corrs_newnp = [
-            "scetlib_dyturbo_LatticeNP_MSHT20mbrange_N3p0LL_N2LO_pdfvars",
-            "scetlib_dyturbo_LatticeNP_MSHT20mcrange_N3p0LL_N2LO_pdfvars",
+            # "scetlib_dyturbo_LatticeNP_MSHT20mbrange_N3p0LL_N2LO_pdfvars",
+            # "scetlib_dyturbo_LatticeNP_MSHT20mcrange_N3p0LL_N2LO_pdfvars",
+            "scetlib_dyturbo_LatticeNPLambda4Bugfix_FranksValsVars_MSHT20mbrange_N3p0LL_N2LO_pdfvars",
+            "scetlib_dyturbo_LatticeNPLambda4Bugfix_FranksValsVars_MSHT20mcrange_N3p0LL_N2LO_pdfvars"
         ]
         has_old_corrs = all(corr in theory_corrs for corr in corrs_oldnp)
         has_new_corrs = all(corr in theory_corrs for corr in corrs_newnp)
@@ -1328,7 +1331,7 @@ class TheoryHelper(object):
                 bhist = "pdfMSHT20mbrange"
         elif has_new_corrs:
             if self.from_hels:
-                bhist = "scetlib_dyturbo_LatticeNP_MSHT20mbrange_N3p0LL_N2LO_pdfvars_CorrByHelicity"
+                bhist = "scetlib_dyturbo_LatticeNPLambda4Bugfix_FranksValsVars_MSHT20mbrange_N3p0LL_N2LO_pdfvars_CorrByHelicity"
             else:
                 raise ValueError(
                     "Taking the mb variations from a new-NP theory correction is only supported when done via helicities."
@@ -1336,6 +1339,8 @@ class TheoryHelper(object):
         else:
             bhist = "scetlib_dyturboMSHT20mbrangeCorr"
         syst_ax = "pdfVar" if from_minnlo else "vars"
+
+        print("Using quark mass variations from", bhist)
 
         self.datagroups.addSystematic(
             bhist,

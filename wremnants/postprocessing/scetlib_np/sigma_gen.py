@@ -6,7 +6,15 @@ it runs from a bT-grid directory, λ_central (with the np_model strings), and th
 gen-bin edges — no rabbit / datacard / fit input. Owns Steps 1–2:
 
     Step 1   btgrid Hankel + Q integral  →  σ_resum(λ; g)   resummed, on the gen grid
-    Step 2   + fixed-order matching      →  σ_gen(λ; g)  = σ_resum(λ; g) + σ_ns(g)
+    Step 2   + fixed-order matching      →  σ_gen(λ; g)
+
+Step 2 adds σ_ns = FO_full − FO_singular, which is known only on the FO inputs'
+own (matching) grid. When that grid refines the gen grid — every DYTurbo
+correction — the matching is the plain sum σ_resum(g) + σ_ns(g). When it does not
+(the coarse NNLOjet exports), σ_ns is applied as a multiplicative factor on its own
+grid and carried into the gen bins by the resummed shape, mirroring how the
+histmaker applies a coarse correction to a fine distribution. See
+:meth:`SigmaGenModel._setup_matching`.
 
 Every factor (b*, I_pert, C_ν, γ_ν^NP, F_eff, the arctan-Q² Q integral, the
 |Y|-fold and qT→ptVGen rebin, σ_ns matching) is derived in the ``param_model.py``
@@ -19,7 +27,15 @@ Public surface (used by the validation scripts and the σ_gen-at-λ tool):
   eff_central, gnu_central, np_model, np_model_nu   λ_central + functional forms
   gen_axes, gen_shape                               the (ptVGen, absYVGen) gen grid
   Y_unique, qT_unique, Q_unique                     btgrid native axes
-  sigma_ns                                          NP-independent FO nonsingular
+  sigma_ns                                          FO nonsingular on the gen grid
+                                                    at λ_central (see _setup_matching:
+                                                    exactly NP-independent in the
+                                                    additive regime; in the
+                                                    multiplicative one it is the
+                                                    additive equivalent at λ_central,
+                                                    so sigma_gen_central - sigma_ns
+                                                    is the resum-only gen spectrum
+                                                    either way)
   sigma_YqT_central                                 native (NY, NqT) resum-only σ at λ_c
   sigma_gen_central                                 matched σ_gen on the gen grid at λ_c
   sigma_YqT_native(eff, gnu)                        native (NY, NqT) σ(λ), pre-fold
@@ -70,29 +86,174 @@ def _default_btgrid_dir():
     return os.path.join(os.path.dirname(base), *_BTGRID_SUBDIR)
 
 
-def compute_nonsingular_gen(
+def nnlojet_export_shards(fo_path):
+    """The per-rapidity NNLOjet text files of a stitched export ``fo_path``.
+
+    The NNLOjet fixed-order input is not one file but a BASE NAME: the y slices
+    live next to it as ``{fo_path}__{ylo}__{yhi}.dat`` (see
+    ``input_tools.resolve_nnlojet_ybin_filename``). Empty list → not an NNLOjet
+    export (a DYTurbo ``results_…scetlibmatch.txt`` is a single real file)."""
+    import glob
+
+    return sorted(glob.glob(f"{fo_path}__*.dat")) if fo_path else []
+
+
+def is_nnlojet_export(fo_path):
+    """True if ``fo_path`` is an NNLOjet stitched-export base name (not a file)."""
+    return (
+        bool(fo_path)
+        and not os.path.isfile(fo_path)
+        and bool(nnlojet_export_shards(fo_path))
+    )
+
+
+def fo_input_exists(fo_path):
+    """Existence check that accepts either FO flavour (DYTurbo file / NNLOjet base)."""
+    return bool(fo_path) and (os.path.exists(fo_path) or is_nnlojet_export(fo_path))
+
+
+# ============================================================================
+# Grid algebra for the fixed-order matching
+# ============================================================================
+# σ_ns is known only on the MATCHING grid M — the intersection of the grids of
+# every input whose value enters it (FO-full ∩ FO-singular, and, through the
+# matching factor's denominator, the resummed grid; the btgrid is finer than
+# either FO input, so today it never constrains M). The model must return σ_gen
+# on R's gen grid G, which need not align with M at all. Bridging them needs a
+# REFINEMENT ref = edges(G) ∪ edges(M): every ref cell then sits inside exactly
+# one G bin and (at most) one M bin, so both maps are exact bin containments and
+# no σ_ns value is ever invented at a granularity M does not have. See
+# ``SigmaGenModel._setup_matching`` for how the two are composed.
+
+
+def _edge_intersection(edge_sets, tol=1e-9):
+    """Edges present in EVERY grid in ``edge_sets`` — the finest grid all of them
+    can represent exactly (what ``rebinHistsToCommon`` computes pairwise)."""
+    common = np.asarray(edge_sets[0], dtype=np.float64)
+    for other in edge_sets[1:]:
+        other = np.asarray(other, dtype=np.float64)
+        common = np.array(
+            [e for e in common if np.any(np.abs(other - e) <= tol)], dtype=np.float64
+        )
+    return common
+
+
+def _refine_edges(gen_edges, match_edges, tol=1e-9):
+    """Union of the gen and matching edges, clipped to the gen range.
+
+    Each resulting cell lies inside exactly one gen bin and inside at most one
+    matching bin, which is what makes both projections exact 0/1 containments."""
+    gen_edges = np.asarray(gen_edges, dtype=np.float64)
+    match_edges = np.asarray(match_edges, dtype=np.float64)
+    inner = match_edges[
+        (match_edges > gen_edges[0] + tol) & (match_edges < gen_edges[-1] - tol)
+    ]
+    ref = np.unique(np.concatenate([gen_edges, inner]))
+    # Drop edges that duplicate a gen edge within tol (np.unique is exact).
+    keep = np.concatenate([[True], np.diff(ref) > tol])
+    return ref[keep]
+
+
+def _owner_index(ref_edges, tgt_edges, name="axis", tol=1e-9):
+    """For each ref bin, the index of the ``tgt`` bin CONTAINING it.
+
+    Returns an int array of length ``len(ref_edges) - 1``; ref bins outside the
+    target range get the sentinel ``len(tgt_edges) - 1`` (one past the last bin),
+    used by the callers as a "no matching information here" marker. Raises if a
+    ref bin straddles a target edge — the refinement is built so it cannot, so
+    that would mean a caller passed a grid the refinement was not built from."""
+    ref_edges = np.asarray(ref_edges, dtype=np.float64)
+    tgt_edges = np.asarray(tgt_edges, dtype=np.float64)
+    n_tgt = tgt_edges.size - 1
+    owner = np.full(ref_edges.size - 1, n_tgt, dtype=np.int64)
+    for i in range(ref_edges.size - 1):
+        lo, hi = ref_edges[i], ref_edges[i + 1]
+        if hi <= tgt_edges[0] + tol or lo >= tgt_edges[-1] - tol:
+            continue  # entirely outside the target grid
+        j = int(np.searchsorted(tgt_edges, 0.5 * (lo + hi)) - 1)
+        j = min(max(j, 0), n_tgt - 1)
+        if lo < tgt_edges[j] - tol or hi > tgt_edges[j + 1] + tol:
+            raise ValueError(
+                f"_owner_index[{name}]: ref bin [{lo}, {hi}] straddles the target "
+                f"bin [{tgt_edges[j]}, {tgt_edges[j+1]}]; the refinement must be a "
+                "sub-binning of the target grid."
+            )
+        owner[i] = j
+    return owner
+
+
+def _containment_matrix(ref_edges, tgt_edges, name="axis", tol=1e-9):
+    """(N_tgt, N_ref) 0/1 matrix summing ref bins into the tgt bin containing them.
+
+    Exact (no splitting, no double counting) because each ref bin is contained in
+    one tgt bin — unlike :func:`bin_sum_matrix`, which places a SOURCE BIN by its
+    centre and therefore silently duplicates a source bin whose centre lands on a
+    target edge and drops a target bin that contains no source centre."""
+    owner = _owner_index(ref_edges, tgt_edges, name=name, tol=tol)
+    n_tgt = np.asarray(tgt_edges).size - 1
+    W = np.zeros((n_tgt, owner.size), dtype=np.float64)
+    inside = owner < n_tgt
+    W[owner[inside], np.nonzero(inside)[0]] = 1.0
+    return W
+
+
+def _grid_refines(fine_edges, coarse_edges, tol=1e-9):
+    """True if every ``coarse`` edge inside the fine range is also a fine edge, i.e.
+    each coarse bin is a union of whole fine bins (so summing fine → coarse is exact).
+    """
+    fine_edges = np.asarray(fine_edges, dtype=np.float64)
+    coarse_edges = np.asarray(coarse_edges, dtype=np.float64)
+    inner = coarse_edges[
+        (coarse_edges >= fine_edges[0] - tol) & (coarse_edges <= fine_edges[-1] + tol)
+    ]
+    return bool(
+        np.all([np.any(np.abs(fine_edges - e) <= tol) for e in inner])
+        and inner.size >= 2
+    )
+
+
+def nonsingular_matching_grid(
     fo_sing_path,
     dyturbo_path,
-    gen_axes_meta,
     charge=0,
     q_lo=60.0,
     q_hi=120.0,
     qt_cutoff=1.0,
     dyturbo_axes=("Q", "Y", "qT"),
 ):
-    """Nonsingular FO term on the model gen grid (NptVGen, NabsYVGen).
+    """σ_ns on its OWN (matching) grid: ``{ns (NqT, NabsY), qT_edges, absY_edges}``.
+
+    The matching grid is the intersection of the two FO inputs' grids — the finest
+    binning on which σ_ns is data rather than interpolation. NOT projected onto any
+    gen binning here; that is the caller's business (see
+    :func:`compute_nonsingular_gen` for the additive projection and
+    :meth:`SigmaGenModel._setup_matching` for the one the model uses).
 
     The fixed-order/DYTurbo matching adds a NP-INDEPENDENT piece to σ_gen:
         σ_gen^matched(λ) = σ_gen^resum(λ) + σ_ns ,
-        σ_ns = (DYTurbo fixed order) − (SCETlib singular fixed order) ,
+        σ_ns = (full fixed order) − (SCETlib singular fixed order) ,
     the ``-hfo_sing + hfo`` that ``read_matched_scetlib_hist`` forms.
-    ``fo_sing_path`` is the SCETlib singular ``…_nnlo_sing…combined.pkl``;
-    ``dyturbo_path`` is the DYTurbo FO ``results_…scetlibmatch.txt`` (``{scale}``
-    → mur1-muf1 for the central). σ_ns is zeroed below ``qt_cutoff`` (as
-    make_theory_corr does), Q-windowed to [q_lo, q_hi], |Y|-folded, and projected
-    onto the coarse (ptVGen, absYVGen) gen bins by SUMMING the bin-integrated
-    native bins.
+    ``fo_sing_path`` is the SCETlib singular ``…_nnlo_sing…combined.pkl``.
+    ``dyturbo_path`` is the FULL FO prediction, in either of the two flavours
+    ``make_theory_corr.py`` accepts as its third corrFile:
+
+      * DYTurbo (``-g scetlib_dyturbo``): the single ``results_…scetlibmatch.txt``
+        (``{scale}`` → mur1-muf1 for the central), read with ``read_dyturbo_hist``.
+      * NNLOjet (``-g scetlib_nnlojet``): the stitched-export BASE NAME (e.g.
+        ``…/nnlojet_export_stitched/ptz``), whose per-rapidity ``…__{ylo}__{yhi}.dat``
+        slices are stitched by ``read_nnlojet_pty_hist``. These files carry no Q
+        axis, so — exactly as ``read_matched_scetlib_nnlojet_hist`` does with
+        ``--nnlojetMassEdges`` — a single Q bin ``[q_lo, q_hi]`` is inserted. The
+        export must therefore have been generated for that same mass window
+        (60–120 for the Z corrections); a NARROWER (q_lo, q_hi) cannot be carved
+        out of an already Q-integrated export and raises.
+
+    σ_ns is zeroed below ``qt_cutoff`` (as make_theory_corr does, via its
+    ``zero_nons_bins=slice(0j, qtCutoff j)``), Q-windowed to [q_lo, q_hi] and
+    |Y|-folded.
     """
+    import hist
+
     from wremnants.utilities.io_tools import input_tools
     from wums import boostHistHelpers as hh
 
@@ -107,23 +268,60 @@ def compute_nonsingular_gen(
             h = h[{"vars": idx}]
         return h
 
-    # SCETlib singular FO and DYTurbo FO, from their own files.
-    dyturbo_path = (
-        dyturbo_path.format(scale="mur1-muf1")
-        if "{scale}" in dyturbo_path
-        else dyturbo_path
-    )
+    # SCETlib singular FO, and the full FO in whichever flavour was passed.
     hfo_sing = _central(input_tools.read_scetlib_hist(fo_sing_path, charge=charge))
-    hfo = input_tools.read_dyturbo_hist(
-        [dyturbo_path], axes=list(dyturbo_axes), charge=charge
-    )
-    if "vars" in hfo.axes.name:
-        hfo = _central(hfo)
+    nnlojet = is_nnlojet_export(dyturbo_path)
+    if nnlojet:
+        # Stitch the per-y slices (read_nnlojet_pty_hist resolves the file names
+        # from the base name), then insert the Q axis the text files lack, as
+        # read_matched_scetlib_nnlojet_hist does with --nnlojetMassEdges. The axis
+        # ORDER is matched to the singular hist because addHists below adds by
+        # position (by_ax_name=False), not by name.
+        hfo = _central(input_tools.read_nnlojet_pty_hist(dyturbo_path, charge=charge))
+        if "Q" in dyturbo_axes and "Q" not in hfo.axes.name:
+            insert_idx = (
+                hfo_sing.axes.name.index("Q") if "Q" in hfo_sing.axes.name else 0
+            )
+            qax = hist.axis.Variable([q_lo, q_hi], name="Q", flow=False)
+            new_axes = list(hfo.axes)
+            new_axes.insert(insert_idx, qax)
+            hfo = hist.Hist(
+                *new_axes,
+                storage=hfo.storage_type(),
+                data=np.expand_dims(hfo.view(flow=True), insert_idx),
+            )
+        if set(hfo.axes.name) == set(hfo_sing.axes.name):
+            hfo = hfo.project(*hfo_sing.axes.name)
+    else:
+        dyturbo_path = (
+            dyturbo_path.format(scale="mur1-muf1")
+            if "{scale}" in dyturbo_path
+            else dyturbo_path
+        )
+        hfo = input_tools.read_dyturbo_hist(
+            [dyturbo_path], axes=list(dyturbo_axes), charge=charge
+        )
+        if "vars" in hfo.axes.name:
+            hfo = _central(hfo)
 
-    # Align shared physics axes (DYTurbo is coarser), then σ_ns = DYTurbo − singular.
+    # Align shared physics axes (the FO input is coarser), then σ_ns = FO − singular.
     for ax in ("Y", "Q", "qT"):
         if ax in set(hfo.axes.name) & set(hfo_sing.axes.name):
             hfo, hfo_sing = hh.rebinHistsToCommon([hfo, hfo_sing], ax)
+    if nnlojet:
+        # The inserted bin is the export's whole mass window: it must survive the
+        # rebin as the one bin the Q-window below then sums. Anything else means
+        # (q_lo, q_hi) is not the window the export was generated for, and a
+        # Q-integrated export cannot be re-windowed.
+        _Qe = np.asarray(hfo.axes["Q"].edges, dtype=np.float64)
+        if _Qe.size != 2 or not np.allclose(_Qe, (q_lo, q_hi)):
+            raise ValueError(
+                f"NNLOjet FO export {dyturbo_path!r} is Q-integrated over one bin "
+                f"[{q_lo}, {q_hi}], but the common Q axis after rebinning against "
+                f"the singular hist is {_Qe.tolist()}. Use the (q_lo, q_hi) the "
+                "export was generated for (--nnlojetMassEdges of its corr build; "
+                "60–120 for the Z corrections)."
+            )
     nonsing_h = hh.addHists(-1.0 * hfo_sing, hfo, flow=False, by_ax_name=False)
 
     if "charge" in nonsing_h.axes.name:
@@ -136,15 +334,64 @@ def compute_nonsingular_gen(
     nonsing_h = hh.makeAbsHist(nonsing_h, "Y")  # signed Y -> |Y|
 
     qT_c = np.asarray(nonsing_h.axes["qT"].centers, dtype=np.float64)
-    absY_c = np.asarray(nonsing_h.axes["absY"].centers, dtype=np.float64)
     v = nonsing_h.project("qT", "absY").values(flow=False)  # (qT, absY)
     v[qT_c < qt_cutoff, :] = 0.0  # zero the nonsingular below the cutoff
+    return {
+        "ns": v,
+        "qT_edges": np.asarray(nonsing_h.axes["qT"].edges, dtype=np.float64),
+        "absY_edges": np.asarray(nonsing_h.axes["absY"].edges, dtype=np.float64),
+    }
 
+
+def compute_nonsingular_gen(
+    fo_sing_path,
+    dyturbo_path,
+    gen_axes_meta,
+    charge=0,
+    q_lo=60.0,
+    q_hi=120.0,
+    qt_cutoff=1.0,
+    dyturbo_axes=("Q", "Y", "qT"),
+):
+    """σ_ns summed onto the gen bins (NptVGen, NabsYVGen) — the ADDITIVE form.
+
+    Thin wrapper over :func:`nonsingular_matching_grid` that projects the matching
+    grid onto ``gen_axes_meta`` with area-fraction (overlap) weights. EXACT when
+    the matching grid refines the gen grid, which is the case for every DYTurbo
+    correction; when it does not (the coarse NNLOjet exports) a σ_ns per gen bin
+    does not exist as data and this returns the flat-density interpolation of it.
+    The model itself does NOT use this — it keeps the coarse matching factor and
+    lets the resummed shape distribute it (:meth:`SigmaGenModel._setup_matching`);
+    this stays for the validation scripts that want a plain additive σ_ns."""
+    m = nonsingular_matching_grid(
+        fo_sing_path,
+        dyturbo_path,
+        charge=charge,
+        q_lo=q_lo,
+        q_hi=q_hi,
+        qt_cutoff=qt_cutoff,
+        dyturbo_axes=dyturbo_axes,
+    )
     ptV_edges = np.asarray(gen_axes_meta[0][1], dtype=np.float64)
     absY_edges = np.asarray(gen_axes_meta[1][1], dtype=np.float64)
-    Wp = bin_sum_matrix(qT_c, ptV_edges)  # (NptVGen, NqT)
-    Wa = bin_sum_matrix(absY_c, absY_edges)  # (NabsYVGen, NabsYsrc)
-    return Wp @ v @ Wa.T  # (NptVGen, NabsYVGen)
+    Wp = _overlap_matrix(m["qT_edges"], ptV_edges)  # (NptVGen, NqT)
+    Wa = _overlap_matrix(m["absY_edges"], absY_edges)  # (NabsYVGen, NabsYsrc)
+    return Wp @ m["ns"] @ Wa.T  # (NptVGen, NabsYVGen)
+
+
+def _overlap_matrix(src_edges, tgt_edges):
+    """(N_tgt, N_src) area-fraction matrix: the share of each source bin's content
+    that falls in each target bin, assuming flat density inside a source bin."""
+    src_edges = np.asarray(src_edges, dtype=np.float64)
+    tgt_edges = np.asarray(tgt_edges, dtype=np.float64)
+    lo_s, hi_s = src_edges[:-1], src_edges[1:]
+    W = np.zeros((tgt_edges.size - 1, lo_s.size), dtype=np.float64)
+    for i in range(tgt_edges.size - 1):
+        ov = np.clip(
+            np.minimum(tgt_edges[i + 1], hi_s) - np.maximum(tgt_edges[i], lo_s), 0, None
+        )
+        W[i] = ov / (hi_s - lo_s)
+    return W
 
 
 # ============================================================================
@@ -163,9 +410,20 @@ _FACTORIZED_CACHE_BASENAME = "combined_btgrid.factorized.npz"
 _FACTORIZED_SCHEMA_VERSION = "factorized_v1"
 # The arrays that fully populate the factorized layout (see _assign_factorized).
 _FACTORIZED_KEYS = (
-    "flat_idx", "Q_unique", "Y_unique", "qT_unique", "bT", "b_bar",
-    "Y_feff_unique", "bT_simpson_w", "I_pert_u", "C_nu_uu", "c_of_u",
-    "feff_idx_u", "gather_idx", "KwqT",
+    "flat_idx",
+    "Q_unique",
+    "Y_unique",
+    "qT_unique",
+    "bT",
+    "b_bar",
+    "Y_feff_unique",
+    "bT_simpson_w",
+    "I_pert_u",
+    "C_nu_uu",
+    "c_of_u",
+    "feff_idx_u",
+    "gather_idx",
+    "KwqT",
 )
 
 
@@ -371,15 +629,9 @@ class SigmaGenModel:
         # (NqT) → (NptVGen).
         ptVGen_edges = self.gen_axes[0][1]
         absY_edges = self.gen_axes[1][1]
-        # |Y| folding: σ(Y) symmetric in Y, so the absY-bin integral is
-        # 2·∫_{absY_lo}^{absY_hi} σ(Y) dY. Use Y >= 0 samples, multiply by 2.
-        Y_pos_mask = self.Y_unique >= 0
-        Y_pos = self.Y_unique[Y_pos_mask]
-        absY_rebin_pos = fz_int.rebin_weights(Y_pos, absY_edges, name="absY")
-        # Pad to full NY: zero on negative-Y columns.
-        W_absY = np.zeros((absY_edges.size - 1, self.Y_unique.size), dtype=np.float64)
-        W_absY[:, Y_pos_mask] = 2.0 * absY_rebin_pos
-        self.W_absY = tf.constant(W_absY, dtype=fz_tf.DTYPE)
+        self.W_absY = tf.constant(
+            self._absY_fold_weights(absY_edges), dtype=fz_tf.DTYPE
+        )
         # qT rebin: btgrid qT (signed nonneg, NqT=141) → ptVGen edges. With a
         # ptVGen overflow bin [last_gen_edge, OVERFLOW_EDGE] (e.g. [44, 100]),
         # rebin_weights' last row Simpson-integrates the btgrid tail qT∈(44,100]
@@ -393,7 +645,9 @@ class SigmaGenModel:
         # ---- Native (NY, NqT) Q-integrated reconstruction at λ_central, BEFORE
         # the |Y|-fold and qT-rebin — exposed so the native-binning validation
         # compares it to the SCETlib reference without the projection layer.
-        self.sigma_YqT_central = self.sigma_YqT_native(self.eff_central, self.gnu_central)
+        self.sigma_YqT_central = self.sigma_YqT_native(
+            self.eff_central, self.gnu_central
+        )
 
         # ---- Fixed-order/DYTurbo nonsingular term (NP-independent).
         # σ_gen^matched(λ) = σ_gen^resum(λ) + σ_ns, added at GEN level so it folds
@@ -406,35 +660,30 @@ class SigmaGenModel:
                 if (nonsingular_dyturbo and "{scale}" in nonsingular_dyturbo)
                 else nonsingular_dyturbo
             )
-            missing = [
-                p for p in (nonsingular_fo_sing, _dy0) if not (p and os.path.exists(p))
-            ]
+            missing = [p for p in (nonsingular_fo_sing, _dy0) if not fo_input_exists(p)]
             if missing:
                 raise FileNotFoundError(
                     "The matched model needs the fixed-order inputs for "
-                    "σ_ns = DYTurbo − SCETlib_singular, but these are missing:\n  "
-                    + "\n  ".join(missing)
+                    "σ_ns = FO − SCETlib_singular, but these are missing:\n  "
+                    + "\n  ".join(str(p) for p in missing)
                     + "\nThey live under wremnants-data/data/TheoryCorrections (the "
                     "SCETlib singular …_nnlo_sing…combined.pkl and the DYTurbo "
-                    "results_…scetlibmatch.txt). Pass nonsingular_fo_sing / "
-                    "nonsingular_dyturbo to point at them (or include_nonsingular="
-                    "False for resum-only)."
+                    "results_…scetlibmatch.txt) — or, for an NNLOjet corr, the "
+                    "stitched-export base name whose …__{ylo}__{yhi}.dat slices sit "
+                    "next to it. Pass nonsingular_fo_sing / nonsingular_dyturbo to "
+                    "point at them (or include_nonsingular=False for resum-only)."
                 )
-            sigma_ns_np = compute_nonsingular_gen(
-                nonsingular_fo_sing,
-                nonsingular_dyturbo,
-                self.gen_axes,
-                q_lo=Q_lo,
-                q_hi=Q_hi,
-                qt_cutoff=nonsingular_qt_cutoff,
+            self._setup_matching(
+                nonsingular_matching_grid(
+                    nonsingular_fo_sing,
+                    nonsingular_dyturbo,
+                    q_lo=Q_lo,
+                    q_hi=Q_hi,
+                    qt_cutoff=nonsingular_qt_cutoff,
+                )
             )
-            if sigma_ns_np.shape != tuple(self.gen_shape):
-                raise ValueError(
-                    f"nonsingular gen shape {sigma_ns_np.shape} != model gen shape "
-                    f"{tuple(self.gen_shape)}"
-                )
-            self.sigma_ns = tf.constant(sigma_ns_np, dtype=fz_tf.DTYPE)
         else:
+            self._matching = None
             self.sigma_ns = tf.zeros(self.gen_shape, dtype=fz_tf.DTYPE)
 
         # ---- Matched σ_gen(λ_central). Reuse the native (NY, NqT) integral
@@ -443,6 +692,12 @@ class SigmaGenModel:
             self.eff_central, self.gnu_central, sigma_YqT=self.sigma_YqT_central
         )
         self.sigma_gen_central = sigma_gen_central
+        # σ_ns as the rest of the code expects it: the additive nonsingular the
+        # matched σ_gen carries at λ_central, so `sigma_gen_central - sigma_ns`
+        # still recovers the resum-only gen spectrum (validate_agreement /
+        # native_validation rely on exactly that identity).
+        if self._matching is not None and self._matching["mode"] == "multiplicative":
+            self.sigma_ns = sigma_gen_central - self._resum_gen(self.sigma_YqT_central)
         gen_flat = tf.reshape(sigma_gen_central, [-1])
         if tf.reduce_any(gen_flat <= 0).numpy():
             n_bad = int(tf.reduce_sum(tf.cast(gen_flat <= 0, tf.int32)))
@@ -511,6 +766,189 @@ class SigmaGenModel:
     # σ_gen evaluation
     # =========================================================================
 
+    # =========================================================================
+    # Fixed-order matching (see the grid-algebra note at module level)
+    # =========================================================================
+
+    def _absY_fold_weights(self, absY_edges):
+        """|Y|-fold + Simpson rebin weights, btgrid (NY signed) → (NabsY).
+
+        σ(Y) is symmetric in Y, so the |Y|-bin integral is 2·∫ over the Y ≥ 0
+        samples; negative-Y columns are zero."""
+        absY_edges = np.asarray(absY_edges, dtype=np.float64)
+        Y_pos_mask = self.Y_unique >= 0
+        pos = fz_int.rebin_weights(self.Y_unique[Y_pos_mask], absY_edges, name="absY")
+        W = np.zeros((absY_edges.size - 1, self.Y_unique.size), dtype=np.float64)
+        W[:, Y_pos_mask] = 2.0 * pos
+        return W
+
+    def _setup_matching(self, m):
+        """Compose σ_ns, known only on its matching grid M, with R's gen grid G.
+
+        Two regimes, picked from the grids themselves:
+
+        * **additive** — M refines G (every DYTurbo correction: those FO inputs are
+          run on grids finer than the analysis binning). Each gen bin is then a
+          union of whole matching bins and
+              σ_gen(g; λ) = σ_resum(g; λ) + Σ_{B ⊂ g} σ_ns(B)
+          is exact. This is the arithmetic the class has always done, kept
+          bit-identical so existing corrections are untouched.
+        * **multiplicative** — M does not refine G (the coarse NNLOjet stitched
+          exports, whose grid intersects the analysis binning at ~0.5 in |Y| and
+          1 GeV in qT). A σ_ns per gen bin is then not data, so the matching factor
+          stays where σ_ns lives,
+              f(B; λ) = 1 + σ_ns(B) / σ_resum(B; λ) ,
+          and the fine resummed spectrum carries it into the gen bins over the
+          refinement ref = edges(G) ∪ edges(M),
+              σ_gen(g; λ) = Σ_{c ⊂ g} σ_resum(c; λ) · f(B(c); λ) .
+          Summing over the c ⊂ B gives back σ_resum(B; λ) + σ_ns(B) exactly at
+          EVERY λ, so the matching-grid total is conserved and only the sub-bin
+          placement of σ_ns follows the resummed shape. That is the structure the
+          histmaker applies — a coarse multiplicative correction on a fine
+          distribution (MiNNLO's, there) — which is why the correction can be built
+          on a grid coarser than the fit's without any bin having to line up.
+
+        Matching bins whose σ_resum is not positive (forward/high-qT cells where the
+        unmatched singular term dips negative) cannot carry a multiplicative factor;
+        those fall back to an area-fraction additive split of σ_ns, which conserves
+        the same per-B total."""
+        ptV_edges, absY_edges = self.gen_axes[0][1], self.gen_axes[1][1]
+        ns_M = np.asarray(m["ns"], dtype=np.float64)
+        qT_M = np.asarray(m["qT_edges"], dtype=np.float64)
+        absY_M = np.asarray(m["absY_edges"], dtype=np.float64)
+
+        # M is the intersection of the grids of everything whose VALUE enters the
+        # matching factor: the two FO inputs (already intersected upstream by
+        # `nonsingular_matching_grid`) and, through f's denominator σ_resum(B), the
+        # resummed grid. So keep only matching edges the btgrid can integrate to
+        # exactly, i.e. that are btgrid sample points, and merge the σ_ns of any bins
+        # that lose an edge. Today this is a no-op — the btgrid is far finer than
+        # either FO input — but a future FO grid that is offset from or coarser than
+        # the btgrid degrades here instead of being integrated inexactly.
+        qT_keep = _edge_intersection([qT_M, self.qT_unique])
+        absY_keep = _edge_intersection([absY_M, np.abs(self.Y_unique)])
+        if qT_keep.size < 2 or absY_keep.size < 2:
+            raise ValueError(
+                "SigmaGenModel: the fixed-order matching grid shares fewer than two "
+                f"edges with the btgrid on one axis (qT: {qT_keep.size}, "
+                f"|Y|: {absY_keep.size}); σ_resum cannot be integrated over any "
+                "matching bin, so the FO matching cannot be applied."
+            )
+        if qT_keep.size != qT_M.size or absY_keep.size != absY_M.size:
+            ns_M = (
+                _containment_matrix(qT_M, qT_keep, name="qT(matching->btgrid)")
+                @ ns_M
+                @ _containment_matrix(
+                    absY_M, absY_keep, name="absY(matching->btgrid)"
+                ).T
+            )
+            print(
+                f"[SigmaGenModel] FO matching grid coarsened onto btgrid-representable "
+                f"edges: {qT_M.size - 1} -> {qT_keep.size - 1} qT bins, "
+                f"{absY_M.size - 1} -> {absY_keep.size - 1} |Y| bins",
+                flush=True,
+            )
+            qT_M, absY_M = qT_keep, absY_keep
+
+        if _grid_refines(qT_M, ptV_edges) and _grid_refines(absY_M, absY_edges):
+            ns_gen = (
+                _overlap_matrix(qT_M, ptV_edges)
+                @ ns_M
+                @ _overlap_matrix(absY_M, absY_edges).T
+            )
+            if ns_gen.shape != tuple(self.gen_shape):
+                raise ValueError(
+                    f"nonsingular gen shape {ns_gen.shape} != model gen shape "
+                    f"{tuple(self.gen_shape)}"
+                )
+            self._matching = {"mode": "additive"}
+            self.sigma_ns = tf.constant(ns_gen, dtype=fz_tf.DTYPE)
+            return
+
+        ref_qT = _refine_edges(ptV_edges, qT_M)
+        ref_absY = _refine_edges(absY_edges, absY_M)
+        # σ_resum on the refinement: same Simpson operator as the gen projection,
+        # on a finer target — the btgrid point grid must therefore resolve the
+        # refinement (rebin_weights raises if a ref bin holds < 2 btgrid samples).
+        self._W_absY_ref = tf.constant(
+            self._absY_fold_weights(ref_absY), dtype=fz_tf.DTYPE
+        )
+        self._W_ptV_ref = tf.constant(
+            fz_int.rebin_weights(self.qT_unique, ref_qT, name="ptVGen(refinement)"),
+            dtype=fz_tf.DTYPE,
+        )
+        # ref → G and ref → M: exact containments (each ref cell lies in one bin).
+        A_ptV = _containment_matrix(ref_qT, ptV_edges, name="ptVGen")
+        A_absY = _containment_matrix(ref_absY, absY_edges, name="absYVGen")
+        S_ptV = _containment_matrix(ref_qT, qT_M, name="qT(matching)")
+        S_absY = _containment_matrix(ref_absY, absY_M, name="absY(matching)")
+        own_q = _owner_index(ref_qT, qT_M, name="qT(matching)")
+        own_y = _owner_index(ref_absY, absY_M, name="absY(matching)")
+        self._A_ptV = tf.constant(A_ptV, dtype=fz_tf.DTYPE)
+        self._A_absY = tf.constant(A_absY, dtype=fz_tf.DTYPE)
+        self._S_ptV = tf.constant(S_ptV, dtype=fz_tf.DTYPE)
+        self._S_absY = tf.constant(S_absY, dtype=fz_tf.DTYPE)
+        self._own_q = tf.constant(own_q, dtype=tf.int32)
+        self._own_y = tf.constant(own_y, dtype=tf.int32)
+        self._ns_M = tf.constant(ns_M, dtype=fz_tf.DTYPE)
+
+        # Which matching bins can carry a multiplicative factor. Decided ONCE at
+        # λ_central so the graph stays static (and so a λ scan cannot flip a bin
+        # between the two treatments mid-fit).
+        res_ref_c = self._resum_ref(self.sigma_YqT_central).numpy()
+        res_M_c = S_ptV @ res_ref_c @ S_absY.T
+        eps = 1e-6 * max(float(np.max(res_M_c)), 0.0)
+        mask = res_M_c > eps
+        self._mask_M = tf.constant(mask, dtype=tf.bool)
+        # Area-fraction additive fallback for the rest (constant in λ).
+        w_q, w_y = np.diff(ref_qT), np.diff(ref_absY)
+        w_qM, w_yM = np.diff(qT_M), np.diff(absY_M)
+        add_ref = np.zeros((w_q.size, w_y.size), dtype=np.float64)
+        fallback_bins = set()
+        for a in range(w_q.size):
+            iq = own_q[a]
+            if iq >= w_qM.size:
+                continue  # ref cell outside the matching grid: no σ_ns to place
+            for b in range(w_y.size):
+                iy = own_y[b]
+                if iy >= w_yM.size or mask[iq, iy]:
+                    continue
+                add_ref[a, b] = ns_M[iq, iy] * (w_q[a] / w_qM[iq]) * (w_y[b] / w_yM[iy])
+                fallback_bins.add((int(iq), int(iy)))
+        self._add_ref = tf.constant(add_ref, dtype=fz_tf.DTYPE)
+        # Count only matching bins the gen grid actually reaches: the ones outside
+        # it have σ_resum = 0 by construction and carry no σ_ns anywhere.
+        n_fallback = len(fallback_bins)
+        print(
+            f"[SigmaGenModel] FO matching: multiplicative on the matching grid "
+            f"({len(w_qM)} qT x {len(w_yM)} |Y| bins) -> gen grid "
+            f"{tuple(self.gen_shape)} via a {len(w_q)} x {len(w_y)} refinement"
+            + (
+                f"; {n_fallback} matching bins with sigma_resum <= 0 use the "
+                "area-split additive fallback"
+                if n_fallback
+                else ""
+            ),
+            flush=True,
+        )
+        self._matching = {"mode": "multiplicative"}
+
+    def _resum_ref(self, sigma_YqT):
+        """Resum-only σ on the refinement: (N_ref_ptV, N_ref_absY)."""
+        s = fz_int.rebin_axis_tf(sigma_YqT, axis=0, weights=self._W_absY_ref)
+        s = fz_int.rebin_axis_tf(s, axis=1, weights=self._W_ptV_ref)
+        return tf.transpose(s, perm=[1, 0])
+
+    def _resum_gen(self, sigma_YqT):
+        """Resum-only σ on the gen grid, through the SAME projection the active
+        matching mode uses — so ``sigma_gen - sigma_ns`` recovers it exactly."""
+        if self._matching is not None and self._matching["mode"] == "multiplicative":
+            r = self._resum_ref(sigma_YqT)
+            return tf.matmul(self._A_ptV, tf.matmul(r, self._A_absY, transpose_b=True))
+        s = fz_int.rebin_axis_tf(sigma_YqT, axis=0, weights=self.W_absY)
+        s = fz_int.rebin_axis_tf(s, axis=1, weights=self.W_ptVGen)
+        return tf.transpose(s, perm=[1, 0])
+
     def sigma_YqT_native(self, eff_params, gnu_params, np_model=None, np_model_nu=None):
         """Reconstruct σ(λ) on the btgrid and Q-integrate, in the btgrid's
         *native* binning: shape (NY, NqT) on the signed-Y / qT grid (Y_unique,
@@ -564,6 +1002,26 @@ class SigmaGenModel:
             sigma_YqT = self.sigma_YqT_native(
                 eff_params, gnu_params, np_model=np_model, np_model_nu=np_model_nu
             )
+        if self._matching is not None and self._matching["mode"] == "multiplicative":
+            # 4-6. Rebin (|Y|-fold + qT) onto the REFINEMENT, then apply the
+            # matching factor of each cell's matching bin (see _setup_matching).
+            res_ref = self._resum_ref(sigma_YqT)
+            res_M = tf.matmul(
+                self._S_ptV, tf.matmul(res_ref, self._S_absY, transpose_b=True)
+            )
+            ones = tf.ones_like(res_M)
+            safe = tf.where(self._mask_M, res_M, ones)
+            f_M = tf.where(self._mask_M, 1.0 + self._ns_M / safe, ones)
+            # Pad with 1 so the "no matching bin" sentinel index is a no-op.
+            f_pad = tf.pad(f_M, [[0, 1], [0, 1]], constant_values=1.0)
+            f_ref = tf.gather(
+                tf.gather(f_pad, self._own_q, axis=0), self._own_y, axis=1
+            )
+            matched_ref = res_ref * f_ref + self._add_ref
+            # 7. Sum the refinement into R's gen bins (exact containment).
+            return tf.matmul(
+                self._A_ptV, tf.matmul(matched_ref, self._A_absY, transpose_b=True)
+            )
         # 4. Rebin Y (signed) → absYVGen (|Y|-folded): (NabsYVGen, NqT).
         sigma_absY_qT = fz_int.rebin_axis_tf(sigma_YqT, axis=0, weights=self.W_absY)
         # 5. Rebin qT → ptVGen: (NabsYVGen, NptVGen).
@@ -572,5 +1030,6 @@ class SigmaGenModel:
         )
         # 6. Reorder to (NptVGen, NabsYVGen) to match R's gen axis order.
         sigma_resum = tf.transpose(sigma_absY_ptV, perm=[1, 0])
-        # 7. Add the NP-independent fixed-order/DYTurbo nonsingular (zeros if off).
+        # 7. Add the NP-independent fixed-order nonsingular (zeros if off; exact
+        # per-gen-bin σ_ns in the additive regime — see _setup_matching).
         return sigma_resum + self.sigma_ns

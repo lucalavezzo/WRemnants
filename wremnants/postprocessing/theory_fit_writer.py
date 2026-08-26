@@ -61,8 +61,22 @@ class SigmaULTheoryFitWriter(TensorWriter):
         keep_nuisances="",
         process_name="Zmumu",
         sigmaul_channel="chSigmaUL",
+        alphas_generator=None,
+        pdf_generator=None,
         **kwargs,
     ):
+        """
+        Parameters:
+        - predGenerator: name of the TheoryCorrections generator to use for the sigmaUL prediction
+        - nois: list of theory systematics to treat as unconstrained (e.g. ["alphaS"])
+        - pdf: PDF set name
+        - exclude_nuisances: regex of nuisance names to exclude entirely
+        - keep_nuisances: regex of nuisance names to keep
+        - process_name: name of the signal process (as it appears in the fit result and theory hists)
+        - sigmaul_channel: name of the channel to use for sigmaUL
+        - alphas_generator: optional separate generator name for the alphaS variation (defaults to <predGenerator>_pdfas)
+        - pdf_generator: optional separate generator name for the PDF variations (defaults to <predGenerator>_pdfvars)
+        """
         super().__init__(**kwargs)
 
         self.logger = logging.child_logger(__name__)
@@ -70,6 +84,8 @@ class SigmaULTheoryFitWriter(TensorWriter):
         self.process_name = process_name
         self.sigmaul_channel = sigmaul_channel
         self.predGenerator = predGenerator
+        self.alphas_generator = alphas_generator
+        self.pdfGenerator = pdf_generator
         self.nois = nois
         self.pdf = pdf
         self.pdf_name = theory_utils.pdfMap[pdf]["name"]
@@ -355,7 +371,13 @@ class SigmaULTheoryFitWriter(TensorWriter):
         return h
 
     def load_sigmaul_data(
-        self, pseudodataGenerator, infile, fitresultMapping, channelSigmaUL
+        self,
+        pseudodataGenerator,
+        infile,
+        fitresultMapping,
+        channelSigmaUL,
+        infile_result="asimov",
+        pseudodata_variation="",
     ):
         if pseudodataGenerator:
             corrfile = f"{common.data_dir}/TheoryCorrections/{pseudodataGenerator}_CorrZ.pkl.lz4"
@@ -365,7 +387,15 @@ class SigmaULTheoryFitWriter(TensorWriter):
                 "Z",
                 f"{pseudodataGenerator}_hist",
             )
-            h_data = _select_baseline_variation(h_data)
+            # Pick a specific variation as the pseudodata (e.g. the joint
+            # multi-lambda var for the closure); default = baseline.
+            if pseudodata_variation:
+                self.logger.info(
+                    "Using pseudodata variation '%s'", pseudodata_variation
+                )
+                h_data = h_data[{"vars": pseudodata_variation}]
+            else:
+                h_data = _select_baseline_variation(h_data)
             h_data = h_data.project("qT", "absY")
             self.add_channel(h_data.axes, self.sigmaul_channel)
             self.add_data(h_data, self.sigmaul_channel)
@@ -387,7 +417,7 @@ class SigmaULTheoryFitWriter(TensorWriter):
         import rabbit.io_tools
 
         fitresult, meta = rabbit.io_tools.get_fitresult(
-            infile, result="asimov", meta=True
+            infile, result=infile_result, meta=True
         )
         self.logger.debug(
             "Available models in fit result: %s", list(fitresult["mappings"].keys())
@@ -428,7 +458,9 @@ class SigmaULTheoryFitWriter(TensorWriter):
     def add_alphas_variation(self):
         self.logger.info("Adding alphaS variation")
         symmetrize = "average" if "alphaS" in self.nois else "quadratic"
-        alphas_var_name = _pdfas_generator_name(self.predGenerator)
+        alphas_var_name = self.alphas_generator or _pdfas_generator_name(
+            self.predGenerator
+        )
         alphas_vars = theory_corrections.load_corr_helpers(
             ["Z"],
             [alphas_var_name],
@@ -555,9 +587,45 @@ class SigmaULTheoryFitWriter(TensorWriter):
                 ],
             )
 
+    def add_np_template_variations(self, var_names, groups=None):
+        """Add one-sided (mirrored) template nuisances from named correction vars.
+
+        Used for the cross-GROUP closures (e.g. TNP x lambda): the param model
+        supplies lambda at fit time, and these add the orthogonal group template(s)
+        -- one per name in ``var_names`` -- as nuisances. Each var is taken from the
+        predGenerator correction at its (group-up, lambda_central) value and MIRRORED
+        around the central process to form a symmetric nuisance (we only ran UP
+        blocks). The nuisance is named ``resumTNP_<var>`` (no ``scetlibNP`` substring,
+        so it does NOT trip the param model's discrete-NP double-counting guard -- it
+        is orthogonal to lambda).
+        """
+        if not var_names:
+            return
+        if groups is None:
+            groups = ["resumTNP", "resum", "pTModeling", "theory", "theory_qcd"]
+        generator_vars = theory_corrections.load_corr_helpers(
+            ["Z"],
+            [self.predGenerator],
+            make_tensor=False,
+            minnlo_ratio=False,
+        )
+        nominal = generator_vars["Z"][self.predGenerator]
+        for var in var_names:
+            self.logger.info(
+                "Adding mirrored NP/TNP template nuisance from var '%s'", var
+            )
+            self.add_systematic(
+                nominal[{"vars": var}],
+                f"resumTNP_{var}",
+                self.process_name,
+                self.sigmaul_channel,
+                mirror=True,
+                groups=groups,
+            )
+
     def add_pdf_variations(self, scale_pdf: float | None = None):
         self.logger.info("Adding PDF variations")
-        pdf_var_key = _pdfvars_generator_name(self.predGenerator)
+        pdf_var_key = self.pdfGenerator or _pdfvars_generator_name(self.predGenerator)
         keys_to_load = [pdf_var_key]
 
         pdfInfo = theory_utils.pdf_info_map("Zmumu_2016PostVFP", self.pdf)

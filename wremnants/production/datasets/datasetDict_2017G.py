@@ -2,6 +2,8 @@
 This is the Low PU data set taken at 5.020 TeV with an integrated luminosity of about 300/pb
 """
 
+import copy
+
 from wremnants.utilities import common
 
 lumicsv = f"{common.data_dir}/bylsoutput_2017G.csv"
@@ -66,3 +68,8 @@ dataDict = {
         "group": "Wtaunu",
     },
 }
+
+# 5.02 TeV low-PU has no separate extension samples, so the "extended" set is the
+# base set. Defined so histmakers that request extended=True (e.g. w_z_gen_dists.py
+# with a non-msht20an3lo --pdfs) work for this era instead of raising.
+dataDict_extended = copy.deepcopy(dataDict)

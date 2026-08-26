@@ -105,6 +105,88 @@ def np_damping_ok(
     }
 
 
+def fold_activity(
+    core,
+    eff_params,
+    gnu_params,
+    np_model=None,
+    np_model_nu=None,
+    bT=None,
+    y_probe=(0.0, 2.5, 5.0),
+):
+    """How much of a ``*_abs`` (damping-fold) form factor is actually FOLDED.
+
+    The fold (``btgrid_tf.abs_fold_tf``) makes the PREDICTION physical for any λ —
+    which is exactly why ``np_damping_ok`` and the ``NPDampingWall`` go quiet on
+    these forms and cannot be used to call a tune physical. What still matters is
+    whether the fit sits where the fold is INACTIVE (the tune is then a genuine
+    tanh_6, bit-for-bit) or where it is ACTIVE (the λ are non-damping and the form
+    factor is the folded, kinked shape no tanh_6 λ can produce).
+
+    Reports, per side, the b_T fraction on which the UNFOLDED (parent tanh_6) form
+    anti-damps — F_eff > 1 / γ_ν > 0, i.e. where these λ are non-damping — where
+    that region sits, and the peak anti-damping left after folding (``F_eff_max``,
+    ``gamma_nu_max``, bounded by e^margin / margin). ``inactive`` (nothing folded
+    anywhere probed) is the "this tune is really a tanh_6 tune" verdict. At
+    margin > 0 the fold proper only bites past the margin, so the reported fraction
+    is the slightly wider statement — about the λ, which is what you want to know.
+
+    Returns ``{}`` for non-fold forms — nothing to say. The λ dicts, the form
+    overrides and the default b_T grid follow the other detectors here (the model's
+    own ``core.bT`` when present, so the verdict is about the grid the fit
+    integrates)."""
+    from wremnants.postprocessing.scetlib_np import btgrid_tf as fz_tf
+
+    eff_model = np_model or core.np_model
+    gnu_model = np_model_nu or core.np_model_nu
+    if not (str(eff_model).endswith("_abs") or str(gnu_model).endswith("_abs")):
+        return {}
+    if bT is None:
+        bT = getattr(core, "bT", None)
+        bT = np.asarray(bT if bT is not None else np.geomspace(1e-3, 50.0, 2000))
+    bT = np.asarray(bT, dtype=np.float64).reshape(-1)
+    eff = {k: v for k, v in eff_params.items() if k != "np_model"}
+    gnu = {k: v for k, v in gnu_params.items() if k != "np_model_nu"}
+
+    out = {"bT_range": (float(bT.min()), float(bT.max()))}
+
+    def _describe(active, side):
+        """Fold-active fraction of the probed b_T (unweighted) + its extent."""
+        frac = float(np.mean(active))
+        rng = (
+            (float(bT[active].min()), float(bT[active].max())) if active.any() else None
+        )
+        return {f"{side}_fold_frac": frac, f"{side}_fold_bT_range": rng}
+
+    if str(gnu_model).endswith("_abs"):
+        # unfolded damping magnitude λ∞_ν·tanh(a); folded where it is < 0
+        g_fold = fz_tf.gamma_nu_NP_tf(bT, gnu, np_model_nu=gnu_model).numpy()
+        g_bare = fz_tf.gamma_nu_NP_tf(
+            bT, gnu, np_model_nu=str(gnu_model).replace("_abs", "")
+        ).numpy()
+        out.update(_describe(g_bare > 0.0, "cs"))
+        out["gamma_nu_max"] = float(np.max(g_fold))
+        out["gamma_nu_max_bare"] = float(np.max(g_bare))
+    if str(eff_model).endswith("_abs"):
+        F_max, F_max_bare, act = -np.inf, -np.inf, np.zeros(bT.size, dtype=bool)
+        for y in y_probe:
+            F = fz_tf.F_eff_tf(y, bT, eff, np_model=eff_model).numpy()
+            Fb = fz_tf.F_eff_tf(
+                y, bT, eff, np_model=str(eff_model).replace("_abs", "")
+            ).numpy()
+            F_max = max(F_max, float(np.max(F)))
+            F_max_bare = max(F_max_bare, float(np.max(Fb)))
+            act |= Fb > 1.0  # bare form anti-damps here ⇒ the fold is doing work
+        out.update(_describe(act, "tmd"))
+        out["tmd_y_probe"] = tuple(float(y) for y in y_probe)
+        out["F_eff_max"] = F_max
+        out["F_eff_max_bare"] = F_max_bare
+    out["inactive"] = not (
+        out.get("cs_fold_frac", 0.0) or out.get("tmd_fold_frac", 0.0)
+    )
+    return out
+
+
 def spectrum_negativity(
     core,
     eff_params,
@@ -215,6 +297,11 @@ def np_physical_report(
     damp = np_damping_ok(
         core, eff_params, gnu_params, np_model=np_model, np_model_nu=np_model_nu
     )
+    # For a *_abs (damping-fold) form the damping probes are trivially satisfied by
+    # construction, so they say nothing; what the λ are doing shows up here instead.
+    fold = fold_activity(
+        core, eff_params, gnu_params, np_model=np_model, np_model_nu=np_model_nu
+    )
     neg = spectrum_negativity(
         core,
         eff_params,
@@ -249,11 +336,23 @@ def np_physical_report(
             f"{neg['neg_area_frac']:.3g} (λ_central {central_neg_area:.3g}), "
             f"min/peak={neg['min_over_peak']:+.3g}, n_neg_bins={neg['n_neg_bins']}"
         )
+    # A folded tune is NOT an issue — the fold makes the prediction physical, which
+    # is the point — but it must never pass silently as "physical λ": report that
+    # the λ are non-damping and only the fold is holding the form factor down.
+    if fold and not fold.get("inactive", True):
+        issues.append(
+            "damping FOLD ACTIVE: the λ are non-damping and only the *_abs fold "
+            "keeps the form factor bounded (b_T fraction folded: CS "
+            f"{fold.get('cs_fold_frac', 0.0):.2f}, TMD "
+            f"{fold.get('tmd_fold_frac', 0.0):.2f}). The prediction is physical; "
+            "the tune is NOT a tanh_6 tune."
+        )
     return {
         "ok": damp["ok"] and not neg_bad,
         "issues": issues,
         "damp": damp,
         "neg": neg,
+        "fold": fold,
         "central_neg_area": central_neg_area,
     }
 
@@ -504,8 +603,8 @@ def run_card_diagnostics(
         rlabel_reco = ref_label_reco or "card nominal (signal)"
         h_reco_m = tf_to_hist(reco_model, model._reco_axes_meta)
         h_reco_n = tf_to_hist(reco_ref, model._reco_axes_meta)
-        # Project onto the model's own reco axes (the fit channel's — 2D or 4D),
-        # not the canonical RECO_AXES: a 2D ptll-yll fit has no angular axes.
+        # Project onto the model's own reco axes (the fit channel's — 1D, 2D, or
+        # 4D), not the canonical RECO_AXES: a 1D/2D ptll(-yll) fit has fewer axes.
         for ax in [n for n, _ in model._reco_axes_meta]:
             plot_ptll_ratio(
                 h_reco_m,

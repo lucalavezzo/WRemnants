@@ -13,7 +13,7 @@ Run everything inside the wmass singularity with the venv + `setup.sh` sourced.
 |---|---|
 | `python -m …scetlib_np.validate_agreement --reference card --datacard <hdf5> [--outdir <dir>]` | model σ_reco **and** σ_gen at λ_central vs the **datacard itself** (`norm[signal]` + `N_gen`). No external inputs. |
 | `python -m …scetlib_np.validate_agreement --reference histmaker --datacard <hdf5> --histmaker <hdf5> [--plot-out <path>] [--gen-histmaker <hdf5>] [--variation lambda21.0 …]` | the same vs an external **histmaker** `nominal` / gen MC, plus the reco λ-**variations** (`Corr[var]/Corr[pdf0]`). |
-| `python -m …scetlib_np.sigma_gen_at_lambda --theory-corr <pkl.lz4> [--datacard <hdf5>] [--lambdas lambda2=0.5 …] [--fitresult <hdf5>] [--plot <path>]` | σ_gen at an **arbitrary λ tune** (cardless, gen-only) vs the official **TheoryCorrection**. Distinct: no datacard/response needed, any λ. |
+| `python -m …scetlib_np.sigma_gen_at_lambda --theory-corr <pkl.lz4> [--datacard <hdf5>] [--num-lambdas lambda2=0.5 …] [--num-fitresult <hdf5>] [--plot <path>]` | σ_gen at an **arbitrary λ tune** (cardless, gen-only) vs the official **TheoryCorrection**. Distinct: no datacard/response needed, any λ. |
 
 ### Analysis / inspection
 | command | what it does |
@@ -31,7 +31,8 @@ Not everyday tools — deeper cross-checks of the bt-grid factorization:
 (export σ onto a SCETlib run's grid), `gen_level_smoke` (gen_level=1 fold-free),
 `factorized_parity` (legacy vs factorized reconstruction), `truth_start_grid`
 (random-truth POI recovery), `damping_wall_dispatch` (NPDampingWall dispatch),
-`timing` (one-σ_gen cost).
+`abs_fold` (the `tanh_6_abs` damping fold: tanh_6 parity, boundedness for any λ,
+J/K across the fold, the mirror degeneracy), `timing` (one-σ_gen cost).
 
 ## Library modules (imported, not run)
 `param_model.py` (the rabbit fit model) · `sigma_gen.py` (datacard-free σ_gen core) ·

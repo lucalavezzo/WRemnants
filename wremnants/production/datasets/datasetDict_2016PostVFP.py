@@ -6,6 +6,10 @@ lumicsv = f"{common.data_dir}/bylsoutput.csv"
 lumijson = (
     f"{common.data_dir}/Cert_271036-284044_13TeV_Legacy2016_Collisions16_JSON.txt"
 )
+# lumijson = (
+#     f"{common.data_dir}/Cert_2016PostVFP_first0p3fb_subset_JSON.txt"
+# )
+
 
 dataDict = {
     "SingleMuon_2016PostVFP": {

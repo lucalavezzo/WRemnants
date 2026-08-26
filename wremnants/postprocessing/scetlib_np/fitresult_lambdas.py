@@ -45,6 +45,7 @@ from wremnants.postprocessing.scetlib_np.params import (
     ALL_PARAMS,
     EFF_PARAMS,
     GNU_PARAMS,
+    check_lambda_overrides,
 )
 
 SECTOR = {
@@ -281,13 +282,41 @@ def _resolve_models(fitresult_path, np_model=None, np_model_nu=None):
     )
 
 
+def _report_filled(tune, np_model, np_model_nu, _seen=set()):
+    """Say once, out loud, which λ the forms needed that the fitresults lacked.
+
+    Fires when the plotted forms are not the fitted ones — e.g. replaying a tanh_6
+    fit under ``tanh_6_sigmoid``, whose cutoff constants no fit ever stored. Pass
+    them explicitly with ``--lambdas`` to choose the values yourself."""
+    key = (np_model, np_model_nu, tune.filled)
+    if tune.filled and key not in _seen:
+        _seen.add(key)
+        print(
+            f"[fitresult_lambdas] {np_model}/{np_model_nu} needs λ the fitresults "
+            "does not carry; using the registry defaults: "
+            + ", ".join(f"{p}={tune.values[p]:g}" for p in tune.filled)
+        )
+
+
 def lambdas_from_fitresult(
-    fitresult_path, which="postfit", result=None, np_model=None, np_model_nu=None
+    fitresult_path,
+    which="postfit",
+    result=None,
+    np_model=None,
+    np_model_nu=None,
+    overrides=None,
 ):
-    """:class:`NPLambdas` for the prefit or postfit point of a new-model fit."""
+    """:class:`NPLambdas` for the prefit or postfit point of a new-model fit.
+
+    ``overrides`` ({λ name: value}) replaces the λ read from the fitresults, so a
+    curve can be drawn at the fit point with one λ set by hand (e.g. the postfit
+    tune with ``lambda4=0``). λ absent from the fitresults are simply added."""
     np_model, np_model_nu = _resolve_models(fitresult_path, np_model, np_model_nu)
     vals = _flat_values(fitresult_path, which=which, result=result)
-    return NPLambdas.from_flat(vals, np_model, np_model_nu)
+    vals.update(overrides or {})
+    tune = NPLambdas.from_flat(vals, np_model, np_model_nu)
+    _report_filled(tune, np_model, np_model_nu)
+    return tune
 
 
 def read_lambda_covariance(fitresult_path, result=None, names=ALL_PARAMS):
@@ -323,15 +352,32 @@ def read_lambda_covariance(fitresult_path, result=None, names=ALL_PARAMS):
 
 
 def sample_lambda_toys(
-    fitresult_path, n_toys=500, seed=0, result=None, np_model=None, np_model_nu=None
+    fitresult_path,
+    n_toys=500,
+    seed=0,
+    result=None,
+    np_model=None,
+    np_model_nu=None,
+    overrides=None,
 ):
     """List of :class:`NPLambdas` toys sampled from the postfit MVN.
 
     Floating λ drawn jointly from their postfit covariance; frozen λ held at their
-    postfit value. (For real/Asimov data the postfit point is the band centre.)"""
+    postfit value. (For real/Asimov data the postfit point is the band centre.)
+
+    An ``overrides`` λ is PINNED: held at the given value and dropped from the
+    sampled set, so the band is the spread of the remaining λ (with their own
+    correlations, conditioned on nothing else) at that fixed λ — not the fit's
+    band with one λ shifted."""
     np_model, np_model_nu = _resolve_models(fitresult_path, np_model, np_model_nu)
+    overrides = overrides or {}
     base = _flat_values(fitresult_path, which="postfit", result=result)
-    floating, mean, cov = read_lambda_covariance(fitresult_path, result=result)
+    base.update(overrides)
+    floating, mean, cov = read_lambda_covariance(
+        fitresult_path,
+        result=result,
+        names=[p for p in ALL_PARAMS if p not in overrides],
+    )
     if not floating:
         return []
     rng = np.random.default_rng(seed)
@@ -346,22 +392,57 @@ def sample_lambda_toys(
 
 
 def plot_series_from_fitresult(
-    fitresult_path, result=None, n_toys=500, seed=0, np_model=None, np_model_nu=None
+    fitresult_path,
+    result=None,
+    n_toys=500,
+    seed=0,
+    np_model=None,
+    np_model_nu=None,
+    overrides=None,
 ):
-    """Build the [prefit dashed, postfit solid + band] series for the plotter."""
+    """Build the [prefit dashed, postfit solid + band] series for the plotter.
+
+    ``overrides`` ({λ name: value}) is applied on top of BOTH fit points and
+    pinned in the band toys, so the two curves still differ only in the λ the fit
+    moved. Raises ``ValueError`` if an override names a λ the fit's forms ignore."""
     np_model, np_model_nu = _resolve_models(fitresult_path, np_model, np_model_nu)
+    overrides = overrides or {}
+    tag = ", ".join(f"{k}={v:g}" for k, v in overrides.items())
+    if overrides:
+        check_lambda_overrides(overrides, np_model, np_model_nu)
+        print(f"[fitresult_lambdas] λ overrides on both fit points (pinned): {tag}")
     pre = lambdas_from_fitresult(
-        fitresult_path, "prefit", result, np_model, np_model_nu
+        fitresult_path, "prefit", result, np_model, np_model_nu, overrides
     )
     post = lambdas_from_fitresult(
-        fitresult_path, "postfit", result, np_model, np_model_nu
+        fitresult_path, "postfit", result, np_model, np_model_nu, overrides
     )
     toys = sample_lambda_toys(
-        fitresult_path, n_toys, seed, result, np_model, np_model_nu
+        fitresult_path, n_toys, seed, result, np_model, np_model_nu, overrides
     )
+    suffix = f" [{tag}]" if overrides else ""
+    # Prefit DASHED, postfit SOLID, one colour for both: linestyle says which of the
+    # two fit points a curve is, and colour is left free to say which TUNE — the
+    # np_function_plots CLI replaces these colours with its per-side colormap ramp
+    # (viridis / plasma) when it draws one or two fits. See the colour contract in the
+    # np_function_plots docstring. The C3 here is the library default for a caller
+    # that plots these series as they come.
     return [
-        Series(label="prefit (λ_central)", lam=pre, color="C0", linestyle="--", lw=1.8),
-        Series(label="postfit", lam=post, color="C3", linestyle="-", lw=2.0, toys=toys),
+        Series(
+            label="prefit (λ_central)" + suffix,
+            lam=pre,
+            color="C3",
+            linestyle="--",
+            lw=1.8,
+        ),
+        Series(
+            label="postfit" + suffix,
+            lam=post,
+            color="C3",
+            linestyle="-",
+            lw=2.0,
+            toys=toys,
+        ),
     ]
 
 

@@ -79,4 +79,16 @@ BC_QUARK_MASS_VARIATIONS = [
         "pdf1",
         "pdf8",
     ),
+    (
+        "scetlib_dyturbo_LatticeNPLambda4Bugfix_FranksValsVars_MSHT20mbrange_N3p0LL_N2LO_pdfvars",
+        "pdfMSHT20mbrange",
+        "pdf1",
+        "pdf6",
+    ),
+    (
+        "scetlib_dyturbo_LatticeNPLambda4Bugfix_FranksValsVars_MSHT20mcrange_N3p0LL_N2LO_pdfvars",
+        "pdfMSHT20mcrange",
+        "pdf1",
+        "pdf8",
+    ),
 ]
