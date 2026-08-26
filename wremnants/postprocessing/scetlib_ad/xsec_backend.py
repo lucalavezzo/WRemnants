@@ -38,22 +38,42 @@ import numpy as np
 EDGE_TOL = 1e-9
 
 
+_IMPORT_HINT = (
+    "scetlib_ad needs the SCETlib autodiff build on PYTHONPATH. Run\n"
+    "    source <path-to>/scetlib-cms/setup.sh\n"
+    "inside the container before rabbit_fit.py (it also sets LD_LIBRARY_PATH "
+    "and lifts the stack limit).\n"
+)
+
+
 def _import_scetlib():
-    """Import the SCETlib python modules, with an actionable error if absent."""
+    """The calculation and the runcard helpers, with an actionable error.
+
+    Deliberately does NOT import ``scetlib_tf``. That module imports
+    TensorFlow, and TensorFlow is only needed to EVALUATE a cache, not to
+    configure the calculation or to build one -- measured at 804 MB of RSS and
+    one ``tf_Compute`` thread per core (1665 threads against 135 with the pools
+    capped), charged against a 32768-threads-per-user ceiling whose failure
+    mode is a ``pthread_create`` abort landing on whichever process next asks
+    for a thread. A cache build calls ``configure`` and nothing else here, so
+    it must not pay for that; see :func:`_import_cached_xsec`.
+    """
     try:
         import scetlib_qT  # noqa: F401
         from scetlib_run import config as sl_config
         from scetlib_run import variations as sl_variations
+    except ImportError as e:
+        raise ImportError(_IMPORT_HINT + f"Original error: {e}") from e
+    return sl_config, sl_variations
+
+
+def _import_cached_xsec():
+    """``ScetlibCachedXsecTF``, and with it TensorFlow. Evaluation only."""
+    try:
         from scetlib_tf import ScetlibCachedXsecTF
     except ImportError as e:
-        raise ImportError(
-            "scetlib_ad needs the SCETlib autodiff build on PYTHONPATH. Run\n"
-            "    source <path-to>/scetlib-cms/setup.sh\n"
-            "inside the container before rabbit_fit.py (it also sets "
-            "LD_LIBRARY_PATH and lifts the stack limit).\n"
-            f"Original error: {e}"
-        ) from e
-    return sl_config, sl_variations, ScetlibCachedXsecTF
+        raise ImportError(_IMPORT_HINT + f"Original error: {e}") from e
+    return ScetlibCachedXsecTF
 
 
 def _scetlib_src():
@@ -91,8 +111,8 @@ def configure(config_path, threads=0, diff_scales=True, fo_resolve_muR=True):
     against the production driver on the analysis card, which sets
     ``mZ = 91.1535``, ``GammaZ = 2.4932``, a custom ``alphaem``, ``sin2_thw``
     and CKM. With them applied, ``operator()`` here reproduces
-    ``scetlib-run-qT.py`` to 1e-9. ``examples/matched_ad/prepare_cache.py``
-    upstream still omits both; do not "simplify" this back to match it.
+    ``scetlib-run-qT.py`` to 1e-9. Both were once missing from the upstream
+    example, which now applies them too -- do not "simplify" either away.
 
     ``diff_scales`` registers muR and the three matching transition points as
     differentiable parameters (``scale_kappa_R``, ``scale_x1..x3``, plus an inert
@@ -110,7 +130,7 @@ def configure(config_path, threads=0, diff_scales=True, fo_resolve_muR=True):
 
     Returns ``(conf, sigma)``.
     """
-    sl_config, sl_variations, _ = _import_scetlib()
+    sl_config, sl_variations = _import_scetlib()
     src = _scetlib_src()
     conf = configparser.ConfigParser(inline_comment_prefixes="#")
     conf.read(os.path.join(src, "prod", "scetlib_run", "defaults.conf"))
@@ -364,7 +384,7 @@ class ScetlibADXsec:
             return [str(n) for n in z["names"]]
 
     def __init__(self, conf_path, cache_path, threads=0):
-        _, _, ScetlibCachedXsecTF = _import_scetlib()
+        ScetlibCachedXsecTF = _import_cached_xsec()
         self.conf_path = os.path.abspath(conf_path)
         self.cache_path = os.path.abspath(cache_path)
         # Match the cache's direction set: caches built before the scale

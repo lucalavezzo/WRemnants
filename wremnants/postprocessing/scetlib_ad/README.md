@@ -29,12 +29,19 @@ and returns exact first and second derivatives from clad.
 | `response.py` | the reco fold: `P(b|g) = R_raw/N_gen`, the datacard response auxiliary, the positivity floor |
 | `param_model.py` | `SCETlibADParamModel` — the rabbit adapter |
 
-Scripts live in `scripts/rabbit/scetlib_ad/`:
+Scripts live in `scripts/rabbit/scetlib_ad/`. The BUILD itself is SCETlib's --
+`scetlib-cms/examples/matched_ad/prepare_cache.py` holds the steps
+(`plan_variations`, `build_prologue`, `build_variations`, `write_cache`,
+`fork_member_build`) and `scetlib-cms/py/scetlib_cache.py` the cache file
+format and both merges. The two scripts here are the rabbit side: the gen axes
+off a card, the runcard, `--subset`, and the shard scheduling.
+
 
 | script | role |
 |---|---|
 | `backend_check.py` | standalone cache sanity: anchor round trip, FD-checked Jacobian, Hessian symmetry, fold sum rule |
 | `prepare_cache_for_card.py` | build a cache for a card's gen binning, or an explicit `--grid-json` |
+| `build_cache_parallel.py` | split the BINS across processes (`--bin-groups`) and merge the shards (`--merge-bins`, `--merge-only`) |
 | `make_debug_card.py` | a self-contained gen-level card built from a cache, for closure tests |
 | `compare_to_scetlib_run.py` | validate the resummed piece against a native SCETlib production run |
 | `conf/Z_CT18Z_N3p0LL_FranksVals.conf` | runcard reproducing the current analysis central (see below) |

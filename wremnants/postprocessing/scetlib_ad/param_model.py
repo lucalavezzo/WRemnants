@@ -609,6 +609,14 @@ class SCETlibADParamModel(ParamModel):
         tnps = adp.tnp_group(self._param_order)
         if tnps:
             groups["resumTNP"] = tnps
+        # The eigenvector coefficients are as dynamic as the TNPs (0 or n_eig of
+        # them, depending on the cache), so they cannot live in the static
+        # IMPACT_GROUP_MEMBERS table. Grouped as ``pdfEig``: deliberately NOT the
+        # card's own ``pdfCT18ZNoAlphaS``, because the label would be a lie on a
+        # cache built from any other PDF set. Compare the two by number.
+        eigs = adp.pdf_group(self._param_order)
+        if eigs:
+            groups["pdfEig"] = eigs
         self.param_impact_groups = {k: v for k, v in groups.items() if v}
 
     def _setup_priors(self, priors, prior_sigmas):
