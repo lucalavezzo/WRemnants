@@ -88,6 +88,33 @@ parser.add_argument(
     help="Apply quark-mass correction generators as additional theory variations.",
 )
 parser.add_argument(
+    "--responseGenBinning",
+    type=str,
+    default="none",
+    choices=["none", "theoryCorr"],
+    help="""Add a SECOND, finer gen binning for the response matrix, in parallel to
+    (and leaving untouched) the --unfoldingAxes binning: extra histograms
+    'nominal_<level>_yieldsResponse' (reco x gen) and '<level>_response' (the gen
+    total on the same grid). 'theoryCorr' takes the grid from the first
+    --theoryCorr file, i.e. the cells the correction is a bin lookup on, which is
+    the binning that makes the bin-averaged correction response exact.""",
+)
+parser.add_argument(
+    "--responseGenPtVExtend",
+    type=float,
+    nargs="+",
+    default=None,
+    help="""PROVISIONAL: extra ptVGen edges ABOVE the theory correction's last qT
+    edge for the response-matrix gen axis (with --responseGenBinning theoryCorr).
+    Strictly increasing, all greater than that edge; the last one becomes the
+    response axis' upper limit and everything beyond it stays in the (dropped)
+    overflow. The correction file's flow bin is exactly 1, so the MC is
+    UNCORRECTED in these bins while the differentiable model would predict a
+    corrected cross section: use this ONLY to build and measure ahead of a
+    correction regenerated on the wider grid, after which the grid is read from
+    the correction file and this flag is no longer needed.""",
+)
+parser.add_argument(
     "--splitSampleInN",
     type=int,
     default=-1,
@@ -146,7 +173,8 @@ datasets = getDatasets(
     aux=args.auxiliaryProcs,
     nanoVersion="v9",
     base_path=args.dataPath,
-    extended="msht20an3lo" not in args.pdfs,
+    extended=False,
+    #extended="msht20an3lo" not in args.pdfs,
     oneMCfileEveryN=args.oneMCfileEveryN,
     era=era,
 )
@@ -348,6 +376,56 @@ if args.unfolding:
             "mass_max": mass_max,
         }
 
+    response_gen_edges = None
+    if args.responseGenBinning == "theoryCorr":
+        if not args.theoryCorr:
+            raise ValueError(
+                "--responseGenBinning theoryCorr needs at least one --theoryCorr"
+            )
+        if not args.poiAsNoi:
+            # the reco x gen histogram is only made in the poi-as-noi path; without
+            # it only the gen total would be written, which is not a response
+            raise ValueError("--responseGenBinning currently requires --poiAsNoi")
+        # The grid the correction itself is defined on: the response is exact on
+        # any binning that refines it, because the applied weight is a bin lookup.
+        corr_edges = theory_corrections.get_corr_grid_edges(args.theoryCorr[0], "Z")
+        # |Y| is truncated at the gen acceptance edge (the unfolding axis' last
+        # edge): bins beyond it are empty once acceptance is required, and
+        # keeping the edge identical keeps the acceptance definition untouched.
+        # qT keeps the correction's full range, so that gen qT above the last
+        # unfolding edge is RESOLVED instead of being a single overflow bin; what
+        # is above the correction's own range stays in the overflow, where the
+        # correction file's flow bins are exactly 1 (i.e. no correction).
+        y_max = max(all_axes["yll"].edges)
+        qt_edges = list(corr_edges["qT"])
+        if args.responseGenPtVExtend:
+            extra = [float(e) for e in args.responseGenPtVExtend]
+            if any(b <= a for a, b in zip(extra[:-1], extra[1:])):
+                raise ValueError(
+                    f"--responseGenPtVExtend must be strictly increasing, got {extra}"
+                )
+            if extra[0] <= qt_edges[-1]:
+                raise ValueError(
+                    f"--responseGenPtVExtend edges must all exceed the "
+                    f"correction's last qT edge {qt_edges[-1]:g}, got {extra}"
+                )
+            qt_edges = qt_edges + extra
+        response_gen_edges = {
+            "ptVGen": qt_edges,
+            "absYVGen": [e for e in corr_edges["absY"] if e <= y_max],
+        }
+        # The two sides must compute the same thing in the same gen bin: the
+        # templates apply the correction as a bin lookup, the model calculates.
+        # Nesting is asserted, not assumed (an extension above the correction's
+        # support is explicitly PROVISIONAL).
+        theory_corrections.check_gen_grid_vs_correction(
+            list(response_gen_edges.items()),
+            args.theoryCorr[0],
+            "Z",
+            allow_uncorrected_above=bool(args.responseGenPtVExtend),
+        )
+        logger.info(f"Response-matrix gen binning from {args.theoryCorr[0]}")
+
     unfolder_z = unfolding_tools.UnfolderZ(
         reco_axes_edges={a: all_axes[a].edges for a in args.axes},
         unfolding_axes_names=args.unfoldingAxes,
@@ -355,6 +433,7 @@ if args.unfolding:
         poi_as_noi=args.poiAsNoi,
         fitresult=args.fitresult,
         cutsmap=cutsmap,
+        response_gen_edges=response_gen_edges,
     )
 
     if not args.poiAsNoi:

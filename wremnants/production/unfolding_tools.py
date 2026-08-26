@@ -365,6 +365,7 @@ class UnfolderZ:
         fitresult_mapping=f"Select",
         fitresult_channel="ch0_masked",
         low_pu=False,
+        response_gen_edges=None,
     ):
         self.analysis_label = "z_lowpu" if low_pu else "z_dilepton"
         self.cutsmap = cutsmap
@@ -429,6 +430,47 @@ class UnfolderZ:
                             Found unfolding axis {ax}\n
                             And weightsByHelicity_helper axis {wbh_axis}
                             """)
+
+        # A SECOND, finer set of gen axes for a response matrix, in parallel to
+        # the unfolding axes and leaving them untouched. The unfolding binning is
+        # tied to the reco binning by construction (one gen bin per two reco
+        # bins, `rebin_pt`), which is coarser than the grid a theory correction
+        # is defined on; folding a prediction of that correction through a
+        # response that cannot resolve its cells costs a bin-averaging error the
+        # per-event reweighted templates do not pay. So this adds histograms,
+        # it does not redefine any.
+        #
+        # Deliberately: no helicity axis (the response is recovered by summing
+        # the helicity partition, so filling with `nominal_weight` gives the same
+        # matrix 9x smaller, and it avoids having to rebin the helicity-xsec
+        # helper onto the finer grid), and the acceptance flag and gen selections
+        # are the UNFOLDING ones, so "acceptance" means exactly what it means
+        # everywhere else.
+        self.response_gen_edges = response_gen_edges
+        self.response_axes = {}
+        self.response_cols = {}
+        if response_gen_edges:
+            names = [n for n in unfolding_axes_names if n != "helicitySig"]
+            for level in self.unfolding_levels:
+                a, c, _ = binning.get_unfolding_dilepton_axes(
+                    names,
+                    reco_axes_edges,
+                    level,
+                    flow_y=self.poi_as_noi,
+                    add_out_of_acceptance_axis=self.poi_as_noi,
+                    rebin_pt=rebin_pt,
+                    edges_override=response_gen_edges,
+                )
+                self.response_axes[level] = a
+                self.response_cols[level] = c
+                logger.info(
+                    f"Response-matrix gen axes ({level}): "
+                    + ", ".join(
+                        f"{ax.name} {ax.size} bins"
+                        + (f" up to {ax.edges[-1]:g}" if hasattr(ax, "edges") else "")
+                        for ax in a
+                    )
+                )
 
         self.unfolding_corr_helper = (
             reweight_to_fitresult(
@@ -511,7 +553,7 @@ class UnfolderZ:
                 else:
                     df_xnorm = df
 
-                add_xnorm_histograms(
+                df_xnorm = add_xnorm_histograms(
                     results,
                     df_xnorm,
                     args,
@@ -527,6 +569,30 @@ class UnfolderZ:
                     add_helicity_axis=self.add_helicity_axis,
                     base_name=level,
                 )
+
+                if self.response_axes:
+                    # The gen total N_gen on the response grid: same events, same
+                    # weight and same node as `{level}` (gen-level weight, no
+                    # experimental scale factors) -- only the gen binning differs,
+                    # so R_raw/N_gen stays a conditional probability.
+                    results.append(
+                        df_xnorm.HistoBoost(
+                            f"{level}_response",
+                            [
+                                a
+                                for a in self.response_axes[level]
+                                if a.name != "acceptance"
+                            ],
+                            [
+                                *[
+                                    c
+                                    for c in self.response_cols[level]
+                                    if c != f"{level}_acceptance"
+                                ],
+                                "nominal_weight",
+                            ],
+                        )
+                    )
 
         return df
 
@@ -577,5 +643,22 @@ class UnfolderZ:
                         f"{noiAsPoiHistName}_theory_weight",
                         yield_axes,
                         [*yield_cols, f"theory_weight_{level}"],
+                    )
+                )
+
+            if self.response_axes:
+                # reco x gen on the finer response grid, in parallel to (and
+                # leaving untouched) the unfolding hist above. No helicity axis:
+                # filled with `nominal_weight`, which is what summing the
+                # helicity partition of the unfolding hist gives.
+                results.append(
+                    df.HistoBoost(
+                        f"nominal_{level}_yieldsResponse",
+                        [*nominal_axes, *self.response_axes[level]],
+                        [
+                            *nominal_cols,
+                            *self.response_cols[level],
+                            "nominal_weight",
+                        ],
                     )
                 )
