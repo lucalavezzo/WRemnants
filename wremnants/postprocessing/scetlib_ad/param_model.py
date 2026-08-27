@@ -214,7 +214,7 @@ class SCETlibADParamModel(ParamModel):
         fit_params=None,
         poi_params="alphaS",
         threads=0,
-        priors=False,
+        priors=True,
         prior_sigmas=None,
         xparam_default=None,
         pdf_coeff_scale=None,
@@ -509,22 +509,24 @@ class SCETlibADParamModel(ParamModel):
     def _register_params(self, fit_params, poi_params, xparam_default):
         """Decide which SCETlib parameters rabbit sees, and their start values."""
         available = list(self.rabbit_names)
-        # Default: alpha_s and the NP lambdas, minus the shape constants. TNPs are
-        # NOT included by default even when the cache carries them -- an
-        # analysis-faithful runcard registers all ten (theta=0 'level0' IS the
-        # N^{3+0}LL prescription), and silently floating ten unconstrained theory
-        # nuisances is not what "fit the NP model" should mean. Ask for them
-        # explicitly via fit_params, with priors.
-        # 'all' = every registered direction except the frozen shape constants,
-        # i.e. hand the whole SCETlib theory uncertainty to the model. That
-        # includes the TNPs, so priors are required (see the check below).
+        # Default: every registered direction except the frozen shape constants
+        # -- alpha_s, the NP lambdas, the profile scales AND the TNPs. The TNPs
+        # were excluded here until 2026-08-27 on the grounds that floating ten
+        # theory nuisances should be explicit; that was the wrong default (Luca).
+        # They are the resummation theory uncertainty of this prediction, an
+        # analysis-faithful runcard registers all ten, and leaving them fixed
+        # understates the uncertainty by default -- the more dangerous of the two
+        # failure modes. They are not UNconstrained: each carries an N(0,1)
+        # constraint by construction, which is why `priors` now defaults to True
+        # (floating a TNP with priors off still raises, see _setup_priors).
+        # 'all' is therefore now the same set as the default; it is kept because
+        # it is explicit at call sites and in the meta_info of every fit run
+        # before this change.
         if _as_name_tuple(fit_params) == ("all",):
             requested = tuple(n for n in available if n not in adp.DEFAULT_FROZEN)
         else:
             requested = _as_name_tuple(fit_params) or tuple(
-                n
-                for n in available
-                if n not in adp.DEFAULT_FROZEN and not n.startswith(adp.TNP_PREFIX_OUT)
+                n for n in available if n not in adp.DEFAULT_FROZEN
             )
         unknown = [n for n in requested if n not in available]
         if unknown:
