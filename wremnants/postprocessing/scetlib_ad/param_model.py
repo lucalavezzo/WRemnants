@@ -78,6 +78,7 @@ XLA cannot compile a ``PyFunc``, so the fit MUST run with ``--jitCompile off``.
 The model checks this at construction.
 """
 
+import configparser
 import copy
 import re
 
@@ -216,6 +217,7 @@ class SCETlibADParamModel(ParamModel):
         priors=False,
         prior_sigmas=None,
         xparam_default=None,
+        pdf_coeff_scale=None,
         check_anchor=True,
         anchor_tol=1e-6,
         response_group=DEFAULT_RESPONSE_GROUP,
@@ -264,6 +266,15 @@ class SCETlibADParamModel(ParamModel):
             ``name=value,...`` shifting the fit START (and the prior mean) off
             the cache anchor, for injection / closure tests. The ratio
             DENOMINATOR is not moved -- it always stays the anchor.
+        pdf_coeff_scale
+            Confidence-level convention for the PDF eigenvector coefficients:
+            the fitted ``pdfEig{i}`` is a unit nuisance theta and SCETlib is
+            evaluated at ``c_e = pdf_coeff_scale * theta``. Default: resolved
+            from ``theory_utils.pdfMap`` for the runcard's own ``pdf_set`` and
+            the card's own ``noi`` (CT18Z + alphaS -> 1/1.645 = 0.60790), which
+            is the same product ``add_pdf_uncertainty`` applies to the templates
+            this replaces. Pass 1 to switch it off (theta = +-1 is then the raw
+            member, i.e. 90% CL for CT18Z), or a float to override.
         check_anchor
             Cross-check the cache anchor against the nonperturbative values the
             card records for its own prediction. An anchor that disagrees
@@ -291,6 +302,10 @@ class SCETlibADParamModel(ParamModel):
 
         # ---- Gen binning, and (reco path) the response matrix.
         self._setup_binning(indata, Q_lo, Q_hi)
+
+        # ---- PDF confidence-level convention (see params.pdf_coeff_scale).
+        self._conf_path = conf
+        self.pdf_coeff_scale = self._resolve_pdf_coeff_scale(pdf_coeff_scale)
 
         # ---- Parameter registration. Everything the fit does NOT expose stays
         # pinned at the anchor, so the SCETlib vector is always complete.
@@ -447,6 +462,50 @@ class SCETlibADParamModel(ParamModel):
             (ax.name, np.asarray(ax.edges, dtype=np.float64)) for ax in info["axes"]
         ]
 
+    def _resolve_pdf_coeff_scale(self, override):
+        """The 90%->68% (and per-set inflation) factor for ``pdfEig{i}``.
+
+        Read from ``theory_utils.pdfMap``, never hard coded: the runcard names
+        the LHAPDF set the cache was built with and the datacard records the
+        nuisance of interest, which is exactly the pair
+        ``add_pdf_uncertainty`` used when it scaled the templates this replaces.
+        """
+        if not any(n.startswith(adp.PDF_PREFIX_OUT) for n in self.rabbit_names):
+            return 1.0
+        if override is not None:
+            scale = float(override)
+            print(
+                f"[SCETlibADParamModel] pdf_coeff_scale = {scale:.6g} (explicit "
+                f"override; the map's own value was not used)",
+                flush=True,
+            )
+            return scale
+
+        cfg = configparser.ConfigParser(inline_comment_prefixes=("#", ";"))
+        cfg.read(self._conf_path)
+        pdf_set = None
+        for sec in cfg.sections():
+            if cfg.has_option(sec, "pdf_set"):
+                pdf_set = cfg.get(sec, "pdf_set").strip()
+                break
+        if pdf_set is None:
+            raise ValueError(
+                f"SCETlibADParamModel: the runcard {self._conf_path} declares no "
+                f"pdf_set, so the confidence-level convention of the "
+                f"{sum(1 for n in self.rabbit_names if n.startswith(adp.PDF_PREFIX_OUT))} "
+                f"eigenvector coefficients is unknown. Pass pdf_coeff_scale."
+            )
+        args = (self.indata.metadata or {}).get("meta_info", {}).get("args", {})
+        noi = args.get("noi") or list(adp.PDF_COEFF_SCALE_NOI_DEFAULT)
+        scale = adp.pdf_coeff_scale(pdf_set, noi)
+        print(
+            f"[SCETlibADParamModel] pdf_coeff_scale = {scale:.6g} "
+            f"({pdf_set}, noi={list(noi)}): pdfEig{{i}} = +-1 is 1 sigma, "
+            f"evaluated at c_e = {scale:.5f}",
+            flush=True,
+        )
+        return scale
+
     def _register_params(self, fit_params, poi_params, xparam_default):
         """Decide which SCETlib parameters rabbit sees, and their start values."""
         available = list(self.rabbit_names)
@@ -539,8 +598,20 @@ class SCETlibADParamModel(ParamModel):
             else:
                 raise ValueError(f"params.REPARAM: unknown kind {kind!r}")
         self._rp_id = ~(self._rp_log | self._rp_quad)
+        # Linear coefficient map on the identity branch, 1.0 everywhere except
+        # the PDF eigenvectors: theta = +-1 has to mean 1 sigma, and a CT18Z
+        # member is 90% CL. Applied to the COEFFICIENT, so the quadratic part of
+        # I(c) is picked up at c^2 = scale^2 as it physically should be, rather
+        # than at scale as the template route is forced to do.
+        self._rp_scale = np.ones(n_fit)
+        if self.pdf_coeff_scale != 1.0:
+            for i, name in enumerate(self._param_order):
+                if name.startswith(adp.PDF_PREFIX_OUT):
+                    self._rp_scale[i] = self.pdf_coeff_scale
         self._reparametrised = tuple(
-            n for n, f in zip(self._param_order, ~self._rp_id) if f
+            n
+            for n, f in zip(self._param_order, ~self._rp_id | (self._rp_scale != 1.0))
+            if f
         )
 
         # Start values: the cache anchor, optionally shifted for injection tests.
@@ -761,7 +832,7 @@ class SCETlibADParamModel(ParamModel):
         """
         t = np.asarray(theta, dtype=np.float64)
         return (
-            np.where(self._rp_id, t, 0.0)
+            np.where(self._rp_id, t * self._rp_scale, 0.0)
             + np.where(self._rp_log, np.exp(t * self._rp_L), 0.0)
             + np.where(
                 self._rp_quad,
@@ -779,7 +850,8 @@ class SCETlibADParamModel(ParamModel):
         t = tf.cast(theta, DTYPE)
         c = tf.constant(self._rp_c, dtype=DTYPE)
         return (
-            tf.constant(self._rp_id.astype(np.float64), dtype=DTYPE) * t
+            tf.constant((self._rp_id * self._rp_scale).astype(np.float64), dtype=DTYPE)
+            * t
             + tf.constant(self._rp_log.astype(np.float64), dtype=DTYPE)
             * tf.exp(t * tf.constant(self._rp_L, dtype=DTYPE))
             + tf.constant(self._rp_quad.astype(np.float64), dtype=DTYPE)

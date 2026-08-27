@@ -143,10 +143,81 @@ def prior_sigma(rabbit):
     if rabbit.startswith(TNP_PREFIX_OUT):
         return TNP_PRIOR_SIGMA
     if rabbit.startswith(PDF_PREFIX_OUT):
-        # Hessian eigenvector coefficients: c = +-1 IS the member 1 sigma, by
-        # construction of build_pdf_variations (exact at c = 0, +-1).
+        # Hessian eigenvector coefficients: theta = +-1 IS 1 sigma, because
+        # pdf_coeff_scale() puts the CL convention in the coefficient map
+        # (theta -> c_e = scale * theta), not in the prior width. See below.
         return 1.0
     return PRIOR_SIGMAS.get(rabbit, None)
+
+
+# --- PDF confidence-level convention -----------------------------------------
+#
+# A Hessian PDF set's members are not all 1 sigma. CT18Z's are 90% CL
+# displacements, and some sets additionally carry an analysis-chosen inflation.
+# The analysis keeps both numbers in one place, ``theory_utils.pdfMap``, and
+# composes them the same way everywhere:
+#
+#     scale = pdf_inflation_factor(pdfMap[set], noi) * pdfMap[set]["scale"]
+#
+# (``rabbit_theory_helper.add_pdf_uncertainty`` when it builds the templates;
+# ``postfit_pdf_helper`` when it reads them back). For CT18Z with noi=alphaS
+# that is 1.0 * 1/1.645 = 0.60790, and MEASURED off the 2D card's own logk it is
+# 0.6025 +- 0.0055 over the 29 eigenvectors -- so the templates really do carry
+# it and the model must too, or the swap inflates the PDF uncertainty by 1.645.
+#
+# WHERE it goes is the one place the model can do better than a template. The
+# template route has no choice but to scale the RESPONSE, because a template is
+# a fixed shape that can only morph linearly. The model evaluates SCETlib at
+# whatever coefficient it is handed, and
+#
+#     I(c) = I_0 + c (I_+ - I_-)/2 + c^2 (I_+ + I_- - 2 I_0)/2
+#
+# is exactly quadratic in c (DrellYan.hpp, exact at c = 0, +-1). So the model
+# scales the COEFFICIENT instead -- theta = +-1 evaluates the calculation at the
+# 68% CL point in eigenvector space, which is what a 1 sigma PDF displacement
+# physically is. The two agree to O(c) and differ by (scale^2 - scale) times the
+# quadratic part, i.e. wherever the up and down members are not mirror images.
+PDF_COEFF_SCALE_NOI_DEFAULT = ("alphaS",)
+
+
+def pdf_set_key(lha_name, pdf_map=None):
+    """``theory_utils.pdfMap`` key whose ``lha_name`` is *lha_name*.
+
+    The cache runcard names the set the way LHAPDF does (``CT18ZNNLO``); the map
+    is keyed by the analysis' short name (``ct18z``). Raises if the set is not
+    in the map -- returning 1.0 for an unknown set would silently drop a
+    convention that is a factor 1.645 for the one set we use.
+    """
+    if pdf_map is None:
+        from wremnants.utilities import theory_utils
+
+        pdf_map = theory_utils.pdfMap
+    want = str(lha_name).strip().lower()
+    for key, info in pdf_map.items():
+        if str(info.get("lha_name", "")).lower() == want:
+            return key
+    raise KeyError(
+        f"params.pdf_set_key: LHAPDF set {lha_name!r} is not in theory_utils."
+        f"pdfMap, so its confidence-level convention is unknown. Add it there, "
+        f"or pass pdf_coeff_scale=<float> explicitly."
+    )
+
+
+def pdf_coeff_scale(lha_name, noi=None, pdf_map=None):
+    """Coefficient scale that makes ``pdfEig{i} = +-1`` the analysis' 1 sigma.
+
+    Mirrors ``postfit_pdf_helper.PostfitPdfHelper`` (which does the same product
+    the other way round) so the model and the templates cannot drift apart:
+    the per-set 90%->68% ``scale`` times the nuisance-of-interest inflation.
+    """
+    from wremnants.utilities import theory_utils
+
+    pdf_map = theory_utils.pdfMap if pdf_map is None else pdf_map
+    info = pdf_map[pdf_set_key(lha_name, pdf_map)]
+    noi = list(PDF_COEFF_SCALE_NOI_DEFAULT if noi is None else noi)
+    return float(theory_utils.pdf_inflation_factor(info, noi)) * float(
+        info.get("scale", 1)
+    )
 
 
 # --- Reparametrisation: unit nuisances for the profile scales -----------------
