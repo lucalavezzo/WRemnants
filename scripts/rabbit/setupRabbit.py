@@ -18,7 +18,7 @@ from wremnants.postprocessing.datagroups import datagroups
 from wremnants.postprocessing.datagroups.datagroups import Datagroups
 from wremnants.postprocessing.histselections import FakeSelectorSimpleABCD
 from wremnants.postprocessing.regression import Regressor
-from wremnants.postprocessing.scetlib_np import response_matrix as scetlib_np_response
+from wremnants.postprocessing.scetlib_ad import response_matrix as scetlib_np_response
 from wremnants.postprocessing.syst_tools import (
     fake_nonclosure_byAxis,
     fake_transferFactor_ptSyst,
