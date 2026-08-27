@@ -90,18 +90,20 @@ parser.add_argument(
 parser.add_argument(
     "--responseGenBinning",
     type=str,
-    default="none",
+    default=None,  # sentinel: see responseGenBinningExplicit below
     choices=["none", "theoryCorr"],
     help="""Add a SECOND, finer gen binning for the response matrix, in parallel to
     (and leaving untouched) the --unfoldingAxes binning: extra histograms
     'nominal_<level>_yieldsResponse' (reco x gen) and '<level>_response' (the gen
-    total on the same grid). 'theoryCorr' takes the grid from the first
-    --theoryCorr file, i.e. the cells the correction is a bin lookup on, which is
-    the binning that makes the bin-averaged correction response exact.
-    'theoryCorr' IS WHAT THE ALPHA_S ANALYSIS USES -- the differentiable SCETlib
-    parameter model reads its response off this grid -- but it is not the default
-    because it requires --poiAsNoi and at least one --theoryCorr (both enforced
-    below), which a plain unfolding run need not pass.""",
+    total on the same grid). 'theoryCorr', THE DEFAULT, takes the grid from the
+    first --theoryCorr file, i.e. the cells the correction is a bin lookup on,
+    which is the binning that makes the bin-averaged correction response exact;
+    it is what the alpha_s analysis uses, the differentiable SCETlib parameter
+    model reading its response off this grid. It needs --poiAsNoi, because the
+    reco x gen histogram only exists in that path. When it is on merely by
+    default and that does not hold, the response is skipped with a warning;
+    asking for it explicitly and not getting it is an error. Pass 'none' for the
+    old behaviour of writing no response histograms at all.""",
 )
 parser.add_argument(
     "--responseGenPtVExtend",
@@ -158,6 +160,13 @@ parser = parsing.set_parser_default(
 args = parser.parse_args()
 
 logger = logging.setup_logger(__file__, args.verbose, args.noColorLogger)
+
+# --responseGenBinning is on by default, so keep "the user asked for it" apart from
+# "it is merely the default": an explicit request that cannot be honoured is an
+# error, while the default has to be able to step aside quietly.
+responseGenBinningExplicit = args.responseGenBinning is not None
+if args.responseGenBinning is None:
+    args.responseGenBinning = "theoryCorr"
 
 if args.dxybsVeto > 0 and args.dxybsVeto < args.dxybs:
     raise ValueError("When using together '--dxybsVeto X --dxybs Y' it must be X > Y.")
@@ -381,14 +390,35 @@ if args.unfolding:
 
     response_gen_edges = None
     if args.responseGenBinning == "theoryCorr":
+        # Preconditions. Failing an EXPLICIT request is an error; the default
+        # stepping aside is not, so that a run which never asked for a response is
+        # not broken by a flag that is merely on by default.
+        unmet = None
         if not args.theoryCorr:
-            raise ValueError(
-                "--responseGenBinning theoryCorr needs at least one --theoryCorr"
-            )
-        if not args.poiAsNoi:
+            unmet = "no --theoryCorr was given"
+        elif not args.poiAsNoi:
             # the reco x gen histogram is only made in the poi-as-noi path; without
             # it only the gen total would be written, which is not a response
-            raise ValueError("--responseGenBinning currently requires --poiAsNoi")
+            unmet = (
+                "--poiAsNoi is off, so there is no reco x gen histogram to put on "
+                "the finer grid (only the gen total)"
+            )
+        if unmet:
+            if responseGenBinningExplicit:
+                raise ValueError(f"--responseGenBinning theoryCorr: {unmet}")
+            logger.warning(
+                f"--responseGenBinning is 'theoryCorr' by default but {unmet}; "
+                f"writing no response histograms. Pass '--responseGenBinning none' "
+                f"to say so explicitly and silence this."
+            )
+            if args.responseGenPtVExtend:
+                logger.warning(
+                    "--responseGenPtVExtend is set but the response is being "
+                    "skipped, so it has no effect."
+                )
+            # Record what was actually done, not what was asked for.
+            args.responseGenBinning = "none"
+    if args.responseGenBinning == "theoryCorr":
         # The grid the correction itself is defined on: the response is exact on
         # any binning that refines it, because the applied weight is a bin lookup.
         corr_edges = theory_corrections.get_corr_grid_edges(args.theoryCorr[0], "Z")
