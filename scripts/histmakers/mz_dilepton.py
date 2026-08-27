@@ -97,7 +97,11 @@ parser.add_argument(
     'nominal_<level>_yieldsResponse' (reco x gen) and '<level>_response' (the gen
     total on the same grid). 'theoryCorr' takes the grid from the first
     --theoryCorr file, i.e. the cells the correction is a bin lookup on, which is
-    the binning that makes the bin-averaged correction response exact.""",
+    the binning that makes the bin-averaged correction response exact.
+    'theoryCorr' IS WHAT THE ALPHA_S ANALYSIS USES -- the differentiable SCETlib
+    parameter model reads its response off this grid -- but it is not the default
+    because it requires --poiAsNoi and at least one --theoryCorr (both enforced
+    below), which a plain unfolding run need not pass.""",
 )
 parser.add_argument(
     "--responseGenPtVExtend",
@@ -173,8 +177,7 @@ datasets = getDatasets(
     aux=args.auxiliaryProcs,
     nanoVersion="v9",
     base_path=args.dataPath,
-    extended=False,
-    # extended="msht20an3lo" not in args.pdfs,
+    extended="msht20an3lo" not in args.pdfs,
     oneMCfileEveryN=args.oneMCfileEveryN,
     era=era,
 )
