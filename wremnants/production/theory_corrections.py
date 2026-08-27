@@ -52,14 +52,30 @@ def make_theory_corr_weight_info(pdf, *, alphas=False, renorm=False):
 
 
 theory_corr_weight_map = {
-    "scetlib_nnlojet_LatticeNPLambda4Bugfix_FranksValsVars_MSHT20aN3LO_N4p0LL_N3LO_pdfvars": make_theory_corr_weight_info("msht20an3lo", renorm=True),
-    "scetlib_nnlojet_LatticeNPLambda4Bugfix_FranksValsVars_MSHT20aN3LO_N4p0LL_N3LO_pdfas": make_theory_corr_weight_info("msht20an3lo", alphas=True, renorm=True),
-    "scetlib_dyturbo_LatticeNPLambda4Bugfix_FranksValsVars_CT18Z_N3p0LL_N2LO_pdfvars": make_theory_corr_weight_info("ct18z"),
-    "scetlib_dyturbo_LatticeNPLambda4Bugfix_FranksValsVars_CT18Z_N3p0LL_N2LO_pdfas": make_theory_corr_weight_info("ct18z", alphas=True, renorm=True),
-    "scetlib_dyturbo_LatticeNPLambda4Bugfix_FranksValsVars_MSHT20_N3p0LL_N2LO_pdfvars": make_theory_corr_weight_info("msht20"),
-    "scetlib_dyturbo_LatticeNPLambda4Bugfix_FranksValsVars_MSHT20_N3p0LL_N2LO_pdfas": make_theory_corr_weight_info("msht20", alphas=True, renorm=True),
-    "scetlib_dyturbo_LatticeNPLambda4Bugfix_FranksVals_CT18Z_N3p0LL_N2LO_pdfvars": make_theory_corr_weight_info("ct18z"),
-    "scetlib_dyturbo_LatticeNPLambda4Bugfix_FranksVals_CT18Z_N3p0LL_N2LO_pdfas": make_theory_corr_weight_info("ct18z", alphas=True, renorm=True),
+    "scetlib_nnlojet_LatticeNPLambda4Bugfix_FranksValsVars_MSHT20aN3LO_N4p0LL_N3LO_pdfvars": make_theory_corr_weight_info(
+        "msht20an3lo", renorm=True
+    ),
+    "scetlib_nnlojet_LatticeNPLambda4Bugfix_FranksValsVars_MSHT20aN3LO_N4p0LL_N3LO_pdfas": make_theory_corr_weight_info(
+        "msht20an3lo", alphas=True, renorm=True
+    ),
+    "scetlib_dyturbo_LatticeNPLambda4Bugfix_FranksValsVars_CT18Z_N3p0LL_N2LO_pdfvars": make_theory_corr_weight_info(
+        "ct18z"
+    ),
+    "scetlib_dyturbo_LatticeNPLambda4Bugfix_FranksValsVars_CT18Z_N3p0LL_N2LO_pdfas": make_theory_corr_weight_info(
+        "ct18z", alphas=True, renorm=True
+    ),
+    "scetlib_dyturbo_LatticeNPLambda4Bugfix_FranksValsVars_MSHT20_N3p0LL_N2LO_pdfvars": make_theory_corr_weight_info(
+        "msht20"
+    ),
+    "scetlib_dyturbo_LatticeNPLambda4Bugfix_FranksValsVars_MSHT20_N3p0LL_N2LO_pdfas": make_theory_corr_weight_info(
+        "msht20", alphas=True, renorm=True
+    ),
+    "scetlib_dyturbo_LatticeNPLambda4Bugfix_FranksVals_CT18Z_N3p0LL_N2LO_pdfvars": make_theory_corr_weight_info(
+        "ct18z"
+    ),
+    "scetlib_dyturbo_LatticeNPLambda4Bugfix_FranksVals_CT18Z_N3p0LL_N2LO_pdfas": make_theory_corr_weight_info(
+        "ct18z", alphas=True, renorm=True
+    ),
     "scetlib_dyturbo_MSHT20_N3p0LL_N2LO_pdfas": make_theory_corr_weight_info(
         "msht20", alphas=True
     ),
@@ -835,7 +851,9 @@ def check_gen_grid_vs_correction(
         above = [float(e) for e in ge if e > ce[-1] + tol]
         inside = ge[ge <= ce[-1] + tol]
         missing = [
-            float(e) for e in inside if not np.any(np.abs(ce - e) <= tol * max(1.0, abs(e)))
+            float(e)
+            for e in inside
+            if not np.any(np.abs(ce - e) <= tol * max(1.0, abs(e)))
         ]
         truncated_at = float(ge[-1]) if (not above and ge[-1] < ce[-1] - tol) else None
         report[name] = {
@@ -875,8 +893,11 @@ def check_gen_grid_vs_correction(
                 f"regenerated on this grid."
             )
     if problems:
-        msg = "gen grid is inconsistent with correction " + generator + ":\n  " + "\n  ".join(
-            problems
+        msg = (
+            "gen grid is inconsistent with correction "
+            + generator
+            + ":\n  "
+            + "\n  ".join(problems)
         )
         if raise_on_mismatch:
             raise ValueError(msg)
@@ -885,9 +906,11 @@ def check_gen_grid_vs_correction(
         logger.info(
             f"gen grid checked against correction {generator}: nests exactly, "
             f"no bins beyond its support"
-            + (" (except the PROVISIONAL ones above)" if any(
-                r["above"] for r in report.values()
-            ) else "")
+            + (
+                " (except the PROVISIONAL ones above)"
+                if any(r["above"] for r in report.values())
+                else ""
+            )
         )
     return report
 
