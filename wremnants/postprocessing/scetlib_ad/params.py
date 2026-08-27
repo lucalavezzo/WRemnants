@@ -279,6 +279,13 @@ DEFAULT_FROZEN = (
     "lambda_inf",
     "lambda_inf_nu",
     "b0_over_bmax_nu",
+    # Inert for the Z, not a choice: b_qqDS scales a channel that does not
+    # contribute, so its whole response is O(1e-16) and its Jacobian column is
+    # identically zero. A zero column is a zero row+column of the NLL Hessian,
+    # i.e. a singular covariance -- `_check_no_inert_params` refuses it, so this
+    # name has to be frozen rather than "fitted with a prior". Measured
+    # 2026-08-27 (studies/.../260827-authoritative-validation, 06_model_defaults).
+    "resumTNP_b_qqDS",
     # Only the CENTRAL matching transition point is varied in the analysis; see
     # the PRIOR_SIGMAS comment. Float these two only as a deliberate study.
     "resumTransition1",
