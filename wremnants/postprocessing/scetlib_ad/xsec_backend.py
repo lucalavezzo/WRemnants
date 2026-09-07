@@ -271,6 +271,24 @@ class GenFold:
         self.n_used = int((rows >= 0).sum())
         self.n_dropped = int(bins.shape[0] - self.n_used)
 
+        # Dropped bins are CORRECT -- they fall outside the card's gen range and
+        # the fold is still exact -- but they are not free: every one is computed
+        # by SCETlib on every call and then thrown away. A couple (the ptVGen
+        # overflow that load_R drops) is normal; a large fraction means the cache
+        # is much finer than this card can use, which is a silent waste rather
+        # than an error, and it also makes any timing attributed to "the cache"
+        # misleading. Measured 2026-09-07: a 770-bin cache against a card that
+        # could only use 627 of them discarded 143 (19 %) on every evaluation.
+        if bins.shape[0] and self.n_dropped > 0.05 * bins.shape[0]:
+            print(
+                f"scetlib_ad: WARNING -- {self.n_dropped} of {bins.shape[0]} "
+                f"cache bin(s) ({100.0 * self.n_dropped / bins.shape[0]:.1f} %) "
+                f"fall outside this card's gen range. They are evaluated on "
+                f"every call and discarded. The result is exact; the cost is "
+                f"not. Either use a cache built for this card's gen binning, or "
+                f"a card whose gen grid uses the cache you have."
+            )
+
         empty = sides.sum(axis=-1) == 0
         if empty.any():
             i, j = np.argwhere(empty)[0]
