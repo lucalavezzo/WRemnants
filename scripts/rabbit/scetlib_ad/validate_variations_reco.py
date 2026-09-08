@@ -184,6 +184,11 @@ def plot_direction(label, ptll_edges, r_mod, r_ref, r_fld, outdir, meta):
             "ref. gen response folded with our R",
         ],
         ylim=[1.0 - pad, 1.0 + pad],
+        # ratio_legend=False: with fill_between=0 wums builds the ratio-panel
+        # legend from colors[-fill_between::2], and -0 is 0, so it labels the
+        # FIRST histogram as if it were an uncertainty band that was never
+        # drawn. Both curves are already named in the upper legend.
+        ratio_legend=False,
         logoPos=0,
         colors=["#5790fc", "#e42536", "#964a8b"],
         linestyles=["solid", "dashed", "dotted"],

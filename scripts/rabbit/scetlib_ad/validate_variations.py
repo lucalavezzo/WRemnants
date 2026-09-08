@@ -192,6 +192,11 @@ def plot_response(label, Te, r_model, r_ref, outdir, meta):
         labels=[f"template  {label}", f"model  {label}"],
         ylim=[1.0 - pad, 1.0 + pad],
         # mplhep loc: 0 = above the axes, 2 = top-left INSIDE the box (default).
+        # ratio_legend=False: with fill_between=0 wums builds the ratio-panel
+        # legend from colors[-fill_between::2], and -0 is 0, so it labels the
+        # FIRST histogram as if it were an uncertainty band that was never
+        # drawn. Both curves are already named in the upper legend.
+        ratio_legend=False,
         logoPos=0,
         colors=["#5790fc", "#e42536"],
         linestyles=["solid", "dashed"],
@@ -245,6 +250,11 @@ def _plot_central(s_cen, r_cen, Te, outdir, meta, y_factor, tag):
     fig = plot_tools.makePlotWithRatioToRef(
         [h1(r), h1(m)],
         labels=["template  central", f"model  central (x{y_factor:g} for |Y|)"],
+        # ratio_legend=False: with fill_between=0 wums builds the ratio-panel
+        # legend from colors[-fill_between::2], and -0 is 0, so it labels the
+        # FIRST histogram as if it were an uncertainty band that was never
+        # drawn. Both curves are already named in the upper legend.
+        ratio_legend=False,
         logoPos=0,
         colors=["#5790fc", "#e42536"],
         linestyles=["solid", "dashed"],

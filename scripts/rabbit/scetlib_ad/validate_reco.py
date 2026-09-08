@@ -247,6 +247,11 @@ def plot_axis(
         logy=False,
         yerr=False,
         nlegcols=1,
+        # ratio_legend=False: with fill_between=0 wums builds the ratio-panel
+        # legend from colors[-fill_between::2], and -0 is 0, so it labels the
+        # FIRST histogram as if it were an uncertainty band that was never
+        # drawn. Both curves are already named in the upper legend.
+        ratio_legend=False,
         logoPos=0,
         cms_label="Preliminary",
         grid=True,
