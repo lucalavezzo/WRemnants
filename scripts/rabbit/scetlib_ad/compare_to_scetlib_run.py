@@ -208,17 +208,33 @@ def main():
     Te = np.concatenate([oT[:, 0], oT[-1:, 1]])
     ours = np.asarray(ours).reshape(Te.size - 1, Ye.size - 1).T  # (Y, qT)
 
-    # --- fold ours onto |Y| if the reference is
+    # --- put ours on the reference's |Y| convention.  Two cache conventions
+    # exist and they need opposite treatments, so decide from the cache's own
+    # edges rather than assuming one (this is the same distinction
+    # xsec_backend.GenFold draws as "signed" vs "positive-side-only", but here
+    # there is no card to read it off, so it comes from the Y edges).
     if ref_absY:
-        if not np.allclose(Ye, -Ye[::-1]):
-            raise SystemExit(
-                "the reference is binned in |Y| but the cache's Y grid is not "
-                "symmetric about 0, so it cannot be folded."
+        if np.allclose(Ye, -Ye[::-1]):
+            n = (Ye.size - 1) // 2
+            ours = ours[n:] + ours[:n][::-1]
+            Ye = Ye[n:]
+            print(f"   folded our signed Y onto |Y|: {n} bins")
+        elif Ye[0] >= -TOL:
+            # positive-side-only: the edges ARE |Y| edges already, but the cache
+            # holds only the Y > 0 half of each, so it is half the |Y|-binned
+            # cross section.  The comparison below is absolute, so this factor
+            # is not cosmetic -- without it every bin reads -50%.
+            ours = 2.0 * ours
+            print(
+                "   cache is positive-side-only: its Y edges are already |Y|, "
+                "x2 for the mirrored half"
             )
-        n = (Ye.size - 1) // 2
-        ours = ours[n:] + ours[:n][::-1]
-        Ye = Ye[n:]
-        print(f"   folded our signed Y onto |Y|: {n} bins")
+        else:
+            raise SystemExit(
+                "the reference is binned in |Y| but the cache's Y grid is "
+                f"neither symmetric about 0 nor positive-side-only: edges "
+                f"{[float(e) for e in Ye]}"
+            )
 
     # --- reference: pick the Q bin matching ours, never sum over Q
     q = next(
@@ -328,7 +344,8 @@ def _report_config(cfg, core):
 
 
 def _plot(ours_c, ref_c, Ye, Te, args, kind):
-    """qT spectrum integrated over Y, with a ratio-to-reference panel."""
+    """The qT and |Y| spectra, each integrated over the other axis, with a
+    ratio-to-reference panel."""
     import hist
 
     from wums import output_tools, plot_tools
@@ -355,29 +372,53 @@ def _plot(ours_c, ref_c, Ye, Te, args, kind):
         "ours/reference (total)": f"{ours_c.sum() / ref_c.sum():.6f}",
     }
 
-    # binwnorm because the qT bins differ hugely in width, so raw contents would
-    # show the binning rather than the spectrum. NOT logx: the first bin starts at
-    # qT = 0, and a log x-axis collapses the whole plot onto that edge.
-    fig = plot_tools.makePlotWithRatioToRef(
-        [h1(ref_c.sum(axis=0), Te, "qT"), h1(ours_c.sum(axis=0), Te, "qT")],
-        labels=["SCETlib reference", "autodiff cache"],
-        colors=["#5790fc", "#e42536"],
-        linestyles=["solid", "dashed"],
-        xlabel=r"boson $q_\mathrm{T}$ (GeV)",
-        ylabel=r"$d\sigma/dq_\mathrm{T}$ (a.u.)",
-        rlabel=["cache / reference"],
-        rrange=[[0.95, 1.05]],
-        binwnorm=1,
-        logy=True,
-        yerr=False,
-        nlegcols=1,
-        cms_label="Work in progress",
-        grid=True,
-    )
-    plot_tools.save_pdf_and_png(args.plot_dir, f"{tag}_qT", fig=fig)
-    output_tools.write_index_and_log(
-        args.plot_dir, f"{tag}_qT", analysis_meta_info=meta, args=args
-    )
+    # One panel per axis, each summed over the other.  binwnorm because both
+    # binnings are strongly non-uniform, so raw contents would show the binning
+    # rather than the spectrum.  NOT logx on qT: the first bin starts at qT = 0
+    # and a log x-axis collapses the whole plot onto that edge.  logy on qT
+    # only -- the |Y| spectrum spans well under a decade, where a log y hides
+    # the shape instead of revealing it.
+    for axname, axis, edges, xlabel, ylabel, logy in (
+        (
+            "qT",
+            0,
+            Te,
+            r"boson $q_\mathrm{T}$ (GeV)",
+            r"$d\sigma/dq_\mathrm{T}$ (a.u.)",
+            True,
+        ),
+        (
+            "absY",
+            1,
+            Ye,
+            r"boson $|Y|$",
+            r"$d\sigma/d|Y|$ (a.u.)",
+            False,
+        ),
+    ):
+        fig = plot_tools.makePlotWithRatioToRef(
+            [
+                h1(ref_c.sum(axis=axis), edges, axname),
+                h1(ours_c.sum(axis=axis), edges, axname),
+            ],
+            labels=["SCETlib reference", "autodiff cache"],
+            colors=["#5790fc", "#e42536"],
+            linestyles=["solid", "dashed"],
+            xlabel=xlabel,
+            ylabel=ylabel,
+            rlabel=["cache / reference"],
+            rrange=[[0.95, 1.05]],
+            binwnorm=1,
+            logy=logy,
+            yerr=False,
+            nlegcols=1,
+            cms_label="Work in progress",
+            grid=True,
+        )
+        plot_tools.save_pdf_and_png(args.plot_dir, f"{tag}_{axname}", fig=fig)
+        output_tools.write_index_and_log(
+            args.plot_dir, f"{tag}_{axname}", analysis_meta_info=meta, args=args
+        )
 
     print(f"\n   plots -> {args.plot_dir}")
 
