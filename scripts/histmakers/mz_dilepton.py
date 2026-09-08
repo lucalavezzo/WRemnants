@@ -389,6 +389,7 @@ if args.unfolding:
         }
 
     response_gen_edges = None
+    response_corr_edges = None
     if args.responseGenBinning == "theoryCorr":
         # Preconditions. Failing an EXPLICIT request is an error; the default
         # stepping aside is not, so that a run which never asked for a response is
@@ -422,6 +423,11 @@ if args.unfolding:
         # The grid the correction itself is defined on: the response is exact on
         # any binning that refines it, because the applied weight is a bin lookup.
         corr_edges = theory_corrections.get_corr_grid_edges(args.theoryCorr[0], "Z")
+        # The whole grid, not just the axes the response is binned in: the
+        # response gen total N_gen has to count exactly the phase space sigma_gen
+        # predicts, so the axes that are NOT gen axes of the response (today Q)
+        # become an explicit gen selection inside UnfolderZ. Read once, here.
+        response_corr_edges = corr_edges
         # |Y| is truncated at the gen acceptance edge (the unfolding axis' last
         # edge): bins beyond it are empty once acceptance is required, and
         # keeping the edge identical keeps the acceptance definition untouched.
@@ -467,6 +473,7 @@ if args.unfolding:
         fitresult=args.fitresult,
         cutsmap=cutsmap,
         response_gen_edges=response_gen_edges,
+        response_corr_edges=response_corr_edges,
     )
 
     if not args.poiAsNoi:

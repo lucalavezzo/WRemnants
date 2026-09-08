@@ -6,8 +6,8 @@ workflow.
 Load the (reco × gen) response matrix R for the ParamModel.
 
 R lives in the unfolding histmaker output (a separate hdf5 from the fit tensor)
-as ``nominal_prefsr_yieldsUnfolding`` under the Z sample group. Slice
-``acceptance=True`` (gen-fiducial), project to reco × (ptVGen, absYVGen): this
+as ``nominal_prefsr_yieldsUnfolding`` under the Z sample group. SUM over
+``acceptance`` (True + False), project to reco × (ptVGen, absYVGen): this
 SUMS the helicitySig axis. R is filled with the weight PARTITION
 ``nominal_weight_helicity`` whose 8 pieces add back up, so the physical yield is
 the helicitySig SUM (NOT UL). The gen-total normalizer N_gen is filled with
@@ -47,7 +47,7 @@ RESPONSE_HIST = "nominal_prefsr_yieldsResponse"
 RESPONSE_GENTOTAL = "prefsr_response"
 DEFAULT_SAMPLE = "Zmumu_2016PostVFP"
 # helicitySig: angular-moment axis; take UL (value -1), the angular-integrated
-# total (see _select_ul_helicity). acceptance sliced True (gen-fiducial) at use.
+# total (see _select_ul_helicity). acceptance is SUMMED (True + False) at use.
 HELICITY_AXIS = "helicitySig"
 
 # Gen ptVGen overflow. The ptVGen axis ends at 44 (last reco-ptll edge), but
@@ -214,8 +214,38 @@ def load_R(
                 f"{hist_name}: missing expected axes {missing}. " f"Got: {ax_names}"
             )
 
-        # Select acceptance=True (fiducial gen), keep reco + gen axes. project()
-        # SUMS helicitySig — correct *for R*: the joint yield is filled with
+        # SUM over `acceptance` (True + False); do NOT slice True. A reco-selected
+        # event belongs in the response regardless of its GEN acceptance flag: it
+        # is in the data, and the card's own signal template carries its yield. The
+        # response the model hands rabbit is a per-reco-bin AVERAGE over the gen
+        # cells feeding that bin, and the correct weights are the template's own
+        # per-gen-cell yields, N(acceptance=True) + N(acceptance=False). Slicing
+        # True dropped the acceptance=False gen cells out of that mixture while the
+        # template yield kept the events, so those events were assigned the
+        # in-acceptance mixture's response instead of their own.
+        #
+        # MEASURED, not argued (studies/scetlib-ad-param-model/260908-absolute-B):
+        # on the 770-bin theory-correction-grid card the ABSOLUTE reco closure
+        # `total model/nominal` goes 0.999026 -> 0.999775, i.e. |1 - ratio| improves
+        # 4.3x, and the raw numerator change `sum(R_summed)/sum(R_True) - 1 =
+        # +7.596e-04` accounts for the whole shift. The effect on a fit-consumed
+        # response is much smaller, <= 2.4e-05 (260908-acceptance-response); the
+        # absolute number is a VALIDATION-metric gain, not a fit gain, because the
+        # model enters as a ratio normalised to 1 at the anchor.
+        #
+        # THE ASSUMPTION, stated plainly: the numerator now contains events whose
+        # gen Q lies OUTSIDE the theory correction's Q window, for which sigma_gen
+        # has NO prediction. Their reco yield is carried proportionally to the
+        # in-window gen yield of the same (qT, |Y|) cell -- an MC extrapolation, of
+        # exactly the same status as the reco<-gen migration already encoded in R.
+        # It shrinks automatically as the correction's Q coverage grows, so it is a
+        # property of today's correction files, not a permanent limitation.
+        #
+        # `slice(None, None, sum)` sums the IN-RANGE bins only. `acceptance` is a
+        # hist.axis.Boolean and has no flow, so this is exactly True + False; being
+        # explicit keeps it flow-safe if that ever changes.
+        #
+        # project() SUMS helicitySig — correct *for R*: the joint yield is filled with
         # `nominal_weight_helicity` (= nominal_weight × helWeight_tensor, see
         # helicity_utils), a PARTITION of the event weight into the 8 helicity
         # pieces g_i(cosθ,φ) that ADD BACK UP to the full angular weight. So
@@ -225,7 +255,7 @@ def load_R(
         # moment expansion whose 0..7 bins do NOT sum to σ), so it takes UL (-1).
         # Same axis, different fill tensor → different recovery. Taking UL of R
         # would discard the angular partition and inflate the closure (~15×).
-        h_sel = h[{"acceptance": True}]
+        h_sel = h[{"acceptance": slice(None, None, sum)}]
         h_proj = h_sel.project(*reco_axes, *gen_axes)
 
         # The ptVGen overflow is appended as a trailing gen bin [last edge,
