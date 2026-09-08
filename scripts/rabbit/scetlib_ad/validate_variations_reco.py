@@ -195,7 +195,7 @@ def plot_direction(label, ptll_edges, r_mod, r_ref, r_fld, outdir, meta):
         logy=False,
         yerr=False,
         nlegcols=1,
-        cms_label="Work in progress",
+        cms_label="Preliminary",
         grid=True,
     )
     safe = re.sub(r"[^A-Za-z0-9]+", "_", label).strip("_")
@@ -558,10 +558,17 @@ def main():
 
 # ---------------------------------------------------------------------------
 def _corr_pickles():
-    """The theory-correction pickles the gen-level reference is read from."""
+    """The theory-correction pickles the gen-level reference is read from.
+
+    ``_pdfvars`` is needed for the 58 PDF eigenvector directions to get a
+    CALC/WGT/GRAIN split rather than only a total residual: the split needs the
+    correction file's own gen response for that direction. A pickle that is not
+    on disk is skipped with a message by the caller, so listing it costs
+    nothing when it is absent.
+    """
     base = os.path.join(_WREM, "wremnants-data", "data", "TheoryCorrections")
     out = []
-    for tag in ("", "_pdfas"):
+    for tag in ("", "_pdfas", "_pdfvars"):
         p = os.path.join(
             base,
             "scetlib_dyturbo_LatticeNPLambda4Bugfix_FranksValsVars_CT18Z_"

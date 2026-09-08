@@ -203,7 +203,7 @@ def plot_response(label, Te, r_model, r_ref, outdir, meta):
         logy=False,
         yerr=False,
         nlegcols=1,
-        cms_label="Work in progress",
+        cms_label="Preliminary",
         grid=True,
     )
     safe = re.sub(r"[^A-Za-z0-9]+", "_", label).strip("_")
@@ -256,7 +256,7 @@ def _plot_central(s_cen, r_cen, Te, outdir, meta, y_factor, tag):
         logy=True,
         yerr=False,
         nlegcols=1,
-        cms_label="Work in progress",
+        cms_label="Preliminary",
         grid=True,
     )
     name = f"central_{tag}" if tag else "central"

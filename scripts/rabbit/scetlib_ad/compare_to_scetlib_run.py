@@ -412,7 +412,8 @@ def _plot(ours_c, ref_c, Ye, Te, args, kind):
             logy=logy,
             yerr=False,
             nlegcols=1,
-            cms_label="Work in progress",
+            logoPos=0,
+            cms_label="Preliminary",
             grid=True,
         )
         plot_tools.save_pdf_and_png(args.plot_dir, f"{tag}_{axname}", fig=fig)

@@ -247,7 +247,8 @@ def plot_axis(
         logy=False,
         yerr=False,
         nlegcols=1,
-        cms_label="Work in progress",
+        logoPos=0,
+        cms_label="Preliminary",
         grid=True,
     )
     name = f"reco_{tag}_{axis}" if density else f"reco_{tag}_{axis}_abs"
