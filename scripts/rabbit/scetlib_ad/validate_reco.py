@@ -239,8 +239,13 @@ def plot_axis(
         out.view(flow=False)[...] = v / v.sum() if density else v
         return out
 
-    _mv = m1.values(flow=False).astype(np.float64)
-    _rv = r1.values(flow=False).astype(np.float64)
+    # Range the panel on the ratio that is actually DRAWN, i.e. after dens().
+    # Taking it from the raw m1/r1 instead would carry the absolute
+    # normalisation offset into a panel showing density-normalised curves: a
+    # run whose absolute scale is off by more than ~38% would silently get the
+    # capped +-50% window and draw a 1.6% residual as a flat line.
+    _mv = dens(m1).values(flow=False).astype(np.float64)
+    _rv = dens(r1).values(flow=False).astype(np.float64)
     rr, _clipped = ratio_range(_mv / np.where(_rv != 0, _rv, np.nan))
     warn_if_clipped(_clipped)
     fig = plot_tools.makePlotWithRatioToRef(
@@ -368,20 +373,35 @@ def main():
     m = np.asarray(sig.numpy() if hasattr(sig, "numpy") else sig, dtype=np.float64)
     m = m.reshape(model.reco_shape)
 
+    # The pb -> yield conversion is a property of the MODEL, not of which
+    # reference we compare it to, so it is applied for BOTH references. It used
+    # to sit inside the `card` branch only, which made
+    # `--reference histmaker --no-match-norm` silently useless: the model came
+    # out at ~3e-5 of an event yield, off the bottom of the ratio panel and not
+    # drawn, so the plot showed the reference's own flat self-ratio and read as
+    # perfect agreement. For the SHAPE comparison the factor cancels anyway,
+    # which is why the omission went unnoticed.
+    #
+    # (indata.norm's signal column and the histmaker's `nominal` are the same
+    # object to 4.3e-05 per bin, measured -- 5x under the closure residual --
+    # so the two references agree on the physics; `histmaker` is the more
+    # direct check, `card` is what the k*sigma_SC construction divides by.)
+    _, lumi = card_signal_column(indata, model.signal_proc_idx, model.reco_shape)
+    k = lumi * 1000.0
+    conv = getattr(getattr(model, "_fold", None), "y_convention", "unknown")
+    if args.y_fold == "auto":
+        y_fold = 2.0 if conv == "positive-side-only" else 1.0
+    else:
+        y_fold = float(args.y_fold)
+    print(f"k         : lumi*1000 = {lumi} * 1000 = {k:.6g}  (physical, pb->yield)")
+    print(f"y fold    : x{y_fold:g}  (cache Y convention: {conv})")
+    m = m * k * y_fold
+
     if args.reference == "card":
         import hist as _hist
 
-        n, lumi = card_signal_column(indata, model.signal_proc_idx, model.reco_shape)
-        k = lumi * 1000.0
-        conv = getattr(getattr(model, "_fold", None), "y_convention", "unknown")
-        if args.y_fold == "auto":
-            y_fold = 2.0 if conv == "positive-side-only" else 1.0
-        else:
-            y_fold = float(args.y_fold)
+        n, _ = card_signal_column(indata, model.signal_proc_idx, model.reco_shape)
         print(f"reference : card indata.norm, proc idx {model.signal_proc_idx}")
-        print(f"k         : lumi*1000 = {lumi} * 1000 = {k:.6g}  (physical, pb->yield)")
-        print(f"y fold    : x{y_fold:g}  (cache Y convention: {conv})")
-        m = m * k * y_fold
         ref = _hist.Hist(
             *[
                 _hist.axis.Variable(e, name=nm, underflow=False, overflow=False)
@@ -391,10 +411,25 @@ def main():
         )
         ref.view(flow=False)[...] = n
     else:
+        print(f"reference : histmaker {args.hist!r} for {args.sample}")
         ref = align_nominal(
             load_nominal(args.histmaker, args.sample, args.hist), reco_axes
         )
         n = np.asarray(ref.values(flow=False), dtype=np.float64)
+        # How much of the histmaker's yield the card's fit range excludes. Both
+        # sides drop it consistently, so it does not bias the ratio -- but a
+        # reader deserves to know the comparison covers 96.5%, not 100%, of the
+        # selected events, and a card whose axes stopped matching would show up
+        # here as a jump.
+        raw = load_nominal(args.histmaker, args.sample, args.hist)
+        tot_all = float(raw.values(flow=True).sum())
+        tot_used = float(n.sum())
+        print(
+            f"reference coverage: {tot_used:.6e} of {tot_all:.6e} "
+            f"({tot_used / tot_all:.4%}); {1 - tot_used / tot_all:.2%} of the "
+            "histmaker yield is outside the card's fit range (dropped from BOTH "
+            "sides)"
+        )
     wmad = summarize(m, n, names, match_norm=args.match_norm)
 
     if args.plot_dir:

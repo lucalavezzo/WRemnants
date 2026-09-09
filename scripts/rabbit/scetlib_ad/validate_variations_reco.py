@@ -401,6 +401,12 @@ def main():
         f"{'GRAIN max':>9} {'GRAIN wmean':>11} "
         f"{'response':>9} {'rel':>8} {'rel_calc':>8}"
     )
+    if args.fix_genbin0:
+        print(
+            "    *** --fix-genbin0 IS ON: the model's gen qT [0,1] response was\n"
+            "    REPLACED by the reference's, so the model agrees by construction in\n"
+            "    the bin where it disagrees most. Numbers below are NOT a blind test. ***"
+        )
     print(
         "   CALC  = model gen response vs the correction file's, folded\n"
         "   WGT   = same response, folded with our anchor spectrum vs with N_gen\n"
@@ -483,6 +489,7 @@ def main():
                     response_wmean=resp,
                     rel_total=rel,
                     rel_calc=relg,
+                    fix_genbin0=int(bool(args.fix_genbin0)),
                 )
             )
             print(
