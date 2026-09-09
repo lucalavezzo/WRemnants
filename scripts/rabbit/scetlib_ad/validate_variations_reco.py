@@ -32,10 +32,24 @@ and the residual factorises exactly into three terms with three different fixes:
   reco bin. Fixed by making the model's central match the MC's, or by finer
   gen bins.
 * GRAIN -- bin-averaged response against per-event. Zero iff the correction
-  ratio is constant inside every gen bin, so it is pure gen-binning
-  granularity and contains no model physics at all. Fixed only by finer gen
-  bins (and it is a cost the discrete templates do NOT pay, because they are
-  built by the same per-event reweighting the reference uses).
+  ratio is constant inside every gen bin.
+
+  It is NOT simply "gen-binning granularity, fixed by finer bins", which is
+  what this said until 260909-grain-zero measured it. Two regimes, and they
+  have different cures:
+
+  - Directions carried purely as a (Q, |Y|, qT) LOOKUP -- everything in the
+    main correction file -- have GRAIN ~ 0 IDENTICALLY on this card, because
+    with ``--responseGenBinning theoryCorr`` the card's gen grid IS the
+    correction's own lookup grid, one cell per gen bin (measured: min = max = 1
+    cell over all 770). Bin-averaged folding and per-event reweighting are then
+    the same operation, so there is nothing for finer bins to fix. Measured
+    GRAIN > CALC in 0 of 37 such directions.
+  - The PDF directions (``_pdfvars`` / ``_pdfas``) are the only generators in
+    ``theory_corr_weight_map``, so their templates carry a per-event
+    ``LHEPdfWeight[i]``, a function of (x1, x2, Q). No (qT, |Y|) binning can
+    resolve that, however fine -- so here GRAIN is real and finer gen bins are
+    NOT the cure. Measured GRAIN > CALC in 47 of 60 such directions.
 
 Note the CENTRAL prediction has essentially no GRAIN term: R is stored as
 R_raw/N_gen, so ``R @ N_gen`` reconstructs the histmaker's reco nominal up to the
@@ -183,7 +197,7 @@ def plot_direction(label, ptll_edges, r_mod, r_ref, r_fld, outdir, meta):
         labels=[
             f"histmaker  {label}",
             f"model  {label}",
-            "ref. gen response folded with our R",
+            "ref. gen response folded with our R  (fold closure)",
         ],
         ylim=[1.0 - pad, 1.0 + pad],
         # ratio_legend=False: with fill_between=0 wums builds the ratio-panel
