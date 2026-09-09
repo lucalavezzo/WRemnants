@@ -41,6 +41,10 @@ sys.path.insert(
     ),
 )
 
+from wremnants.postprocessing.scetlib_ad.validation_plots import (  # noqa: E402
+    ratio_range,
+    warn_if_clipped,
+)
 from wremnants.postprocessing.scetlib_ad.xsec_backend import (  # noqa: E402
     ScetlibADXsec,
 )
@@ -396,6 +400,11 @@ def _plot(ours_c, ref_c, Ye, Te, args, kind):
             False,
         ),
     ):
+        rr, _clipped = ratio_range(
+            ours_c.sum(axis=axis)
+            / np.where(ref_c.sum(axis=axis) != 0, ref_c.sum(axis=axis), np.nan)
+        )
+        warn_if_clipped(_clipped)
         fig = plot_tools.makePlotWithRatioToRef(
             [
                 h1(ref_c.sum(axis=axis), edges, axname),
@@ -407,7 +416,7 @@ def _plot(ours_c, ref_c, Ye, Te, args, kind):
             xlabel=xlabel,
             ylabel=ylabel,
             rlabel=["cache / reference"],
-            rrange=[[0.95, 1.05]],
+            rrange=[rr],
             binwnorm=1,
             logy=logy,
             yerr=False,

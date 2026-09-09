@@ -40,6 +40,11 @@ import os
 
 import numpy as np
 
+from wremnants.postprocessing.scetlib_ad.validation_plots import (  # noqa: E402
+    ratio_range,
+    warn_if_clipped,
+)
+
 NOMINAL_HIST = "nominal"
 SIGNAL_SAMPLE = "Zmumu_2016PostVFP"
 AXIS_LABELS = {
@@ -234,6 +239,10 @@ def plot_axis(
         out.view(flow=False)[...] = v / v.sum() if density else v
         return out
 
+    _mv = m1.values(flow=False).astype(np.float64)
+    _rv = r1.values(flow=False).astype(np.float64)
+    rr, _clipped = ratio_range(_mv / np.where(_rv != 0, _rv, np.nan))
+    warn_if_clipped(_clipped)
     fig = plot_tools.makePlotWithRatioToRef(
         [dens(r1), dens(m1)],
         labels=[ref_label, "model $\\sigma_{reco}$"],
@@ -242,7 +251,7 @@ def plot_axis(
         xlabel=AXIS_LABELS.get(axis, axis),
         ylabel="normalized" if density else "yield",
         rlabel=["model / nominal"],
-        rrange=[[0.97, 1.03]],
+        rrange=[rr],
         binwnorm=1,
         logy=False,
         yerr=False,

@@ -70,6 +70,11 @@ for _p in (_WREM, _HERE):
 
 import validate_variations as VV  # noqa: E402  (the gen-level script, reused)
 
+from wremnants.postprocessing.scetlib_ad.validation_plots import (  # noqa: E402
+    ratio_range,
+    warn_if_clipped,
+)
+
 NOMINAL_HIST = "nominal"
 SIGNAL_SAMPLE = "Zmumu_2016PostVFP"
 CORR_MAIN = (
@@ -171,11 +176,8 @@ def plot_direction(label, ptll_edges, r_mod, r_ref, r_fld, outdir, meta):
 
     dev = max(float(np.max(np.abs(r_ref - 1.0))), float(np.max(np.abs(r_mod - 1.0))))
     pad = max(1.2 * dev, 2.0e-3)
-    rr = max(
-        float(np.max(np.abs(r_mod / r_ref - 1.0))),
-        float(np.max(np.abs(r_fld / r_ref - 1.0))),
-    )
-    rpad = max(1.3 * rr, 1.0e-3)
+    rrange_, _clipped = ratio_range(r_mod / r_ref, r_fld / r_ref)
+    warn_if_clipped(_clipped)
     fig = plot_tools.makePlotWithRatioToRef(
         [h1(r_ref), h1(r_mod), h1(r_fld)],
         labels=[
@@ -195,7 +197,7 @@ def plot_direction(label, ptll_edges, r_mod, r_ref, r_fld, outdir, meta):
         xlabel=r"$p_{T}^{\ell\ell}$ [GeV]",
         ylabel=r"$N_\mathrm{var}/N_\mathrm{central}$ (reco)",
         rlabel=["/ histmaker"],
-        rrange=[[1.0 - rpad, 1.0 + rpad]],
+        rrange=[rrange_],
         binwnorm=None,
         logy=False,
         yerr=False,

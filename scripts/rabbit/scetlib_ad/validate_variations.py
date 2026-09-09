@@ -33,6 +33,10 @@ sys.path.insert(
     0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..")
 )
 
+from wremnants.postprocessing.scetlib_ad.validation_plots import (  # noqa: E402
+    ratio_range,
+    warn_if_clipped,
+)
 from wremnants.postprocessing.scetlib_ad.xsec_backend import ScetlibADXsec  # noqa: E402
 
 # Variation label -> {SCETlib parameter: PHYSICAL value}. Absolute values, not
@@ -187,6 +191,11 @@ def plot_response(label, Te, r_model, r_ref, outdir, meta):
         float(np.max(np.abs(np.asarray(r_model, float) - 1.0))),
     )
     pad = max(1.2 * dev, 2.0e-3)
+    rr, _clipped = ratio_range(
+        np.asarray(r_model, float)
+        / np.where(np.asarray(r_ref, float) != 0, np.asarray(r_ref, float), np.nan)
+    )
+    warn_if_clipped(_clipped)
     fig = plot_tools.makePlotWithRatioToRef(
         [h1(r_ref), h1(r_model)],
         labels=[f"template  {label}", f"model  {label}"],
@@ -203,7 +212,7 @@ def plot_response(label, Te, r_model, r_ref, outdir, meta):
         xlabel=r"boson $q_\mathrm{T}$ (GeV)",
         ylabel=r"$\sigma_\mathrm{var}/\sigma_\mathrm{central}$",
         rlabel=["model / template"],
-        rrange=[[0.995, 1.005]],
+        rrange=[rr],
         binwnorm=None,
         logy=False,
         yerr=False,
@@ -247,6 +256,8 @@ def _plot_central(s_cen, r_cen, Te, outdir, meta, y_factor, tag):
 
     m = np.nansum(np.asarray(s_cen, float), axis=0) * y_factor
     r = np.nansum(np.asarray(r_cen, float), axis=0)
+    rr2, _clipped = ratio_range(m / np.where(r != 0, r, np.nan))
+    warn_if_clipped(_clipped)
     fig = plot_tools.makePlotWithRatioToRef(
         [h1(r), h1(m)],
         labels=["template  central", f"model  central (x{y_factor:g} for |Y|)"],
@@ -261,7 +272,7 @@ def _plot_central(s_cen, r_cen, Te, outdir, meta, y_factor, tag):
         xlabel=r"boson $q_\mathrm{T}$ (GeV)",
         ylabel=r"$\sigma$ (a.u.)",
         rlabel=["model / template"],
-        rrange=[[0.95, 1.05]],
+        rrange=[rr2],
         binwnorm=None,
         logy=True,
         yerr=False,

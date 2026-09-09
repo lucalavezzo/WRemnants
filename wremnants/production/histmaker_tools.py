@@ -154,6 +154,42 @@ def analysis_debug_output(results):
     logger.debug("")
 
 
+def _add_scetlib_np_lambda_central(meta_info, args):
+    """Record the NP anchor the theory correction was generated at.
+
+    The scetlib_ad ParamModel needs to know which lambda values the templates
+    were built with, so it can refuse a cache built at a different tune. That
+    mismatch is otherwise INVISIBLE -- the model's ratio is exactly 1 at the fit
+    start regardless -- so the anchor is the only thing standing between us and
+    a silently wrong fit. See scetlib_ad/lambda_central.py.
+
+    A missing or unparsable correction is not an error: most analyses have no
+    SCETlib NP correction. But it is logged at WARNING, not swallowed, because
+    the whole point is that its absence is undetectable downstream.
+    """
+    theory_corr = getattr(args, "theoryCorr", None)
+    if not theory_corr:
+        return
+    try:
+        from wremnants.postprocessing.scetlib_ad import lambda_central
+
+        lc_meta = lambda_central.build_lambda_central_meta(theory_corr)
+        if lc_meta:
+            meta_info[lambda_central.META_KEY] = lc_meta
+            logger.info(
+                f"Recorded NP anchor ({lambda_central.META_KEY}) for procs "
+                f"{sorted(lc_meta)}"
+            )
+        else:
+            logger.warning(
+                f"No NP anchor recorded for theoryCorr {theory_corr[0]!r}: no "
+                "correction pkl with a Nonperturbative section. A scetlib_ad "
+                "fit built on this output cannot cross-check its cache anchor."
+            )
+    except Exception as exc:  # noqa: BLE001 -- never fail a histmaker for this
+        logger.warning(f"Could not record the NP anchor: {exc}")
+
+
 def write_analysis_output(results, outfile, args, name_append=[]):
     analysis_debug_output(results)
 
@@ -203,11 +239,9 @@ def write_analysis_output(results, outfile, args, name_append=[]):
             ioutils.pickle_dump_h5py(k, v, f, override=open_as != "w")
 
         if "meta_info" not in f.keys():
-            ioutils.pickle_dump_h5py(
-                "meta_info",
-                output_tools.make_meta_info_dict(args=args, wd=common.base_dir),
-                f,
-            )
+            meta_info = output_tools.make_meta_info_dict(args=args, wd=common.base_dir)
+            _add_scetlib_np_lambda_central(meta_info, args)
+            ioutils.pickle_dump_h5py("meta_info", meta_info, f)
 
     logger.info(f"Writing output: {time.time()-time0}")
     logger.info(f"Output saved in {outfile}")
