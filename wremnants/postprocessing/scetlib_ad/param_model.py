@@ -76,6 +76,26 @@ exactly 0 and 1) and free at these sizes (at most ~25 x 25).
 
 XLA cannot compile a ``PyFunc``, so the fit MUST run with ``--jitCompile off``.
 The model checks this at construction.
+
+Blinding: NOTHING AT OR BELOW ``compute()`` MAY PRINT A PARAMETER VALUE
+---------------------------------------------------------------------
+rabbit's blinding is a change of variables inside the likelihood, so
+``compute()`` is handed the TRUE physical parameter values -- that is the whole
+point, since SCETlib has to be evaluated at the real alpha_s. The blinded
+quantity is rabbit's internal coordinate, which is what gets reported.
+
+The consequence is that this file is the one place that can unblind the fit by
+accident. So: nothing in ``compute``, ``_ratio_from_param``, ``_sigma_gen``,
+``_physical``, ``_physical_tf`` or ``_full_vector`` may ``print``, log, or
+format a parameter VALUE into a message -- including an exception message.
+Names, bin counts, bounds and the ANCHOR are all fine (the anchor is public by
+construction: it is read from the correction's own runcard).
+
+Every print in this file is deliberately at CONSTRUCTION time, before a fitter
+exists and therefore before any offset is armed. If you add a domain assert to
+the compute path, use ``tf.Assert`` with a constant string: the
+``tf.debugging.assert_*`` helpers print the offending tensor by default, and
+here that tensor IS the physical alpha_s.
 """
 
 import configparser
@@ -711,6 +731,30 @@ class SCETlibADParamModel(ParamModel):
         self.allowNegativeParam = True
         self.is_linear = False
         self.xparamdefault = tf.constant(defaults, dtype=self.indata.dtype)
+
+        # Blind the POI ADDITIVELY, the way rabbit already blinds a nuisance of
+        # interest -- which is what alphaS WAS before this model: the pdfAlphaS
+        # template nuisance, zero-centred with |theta| = 1 equal to
+        # Delta(alpha_s) = 0.002. It has the same shape here, but it is a POI
+        # rather than a card nuisance, and rabbit's POI blinding is
+        # MULTIPLICATIVE because its default POI is a signal strength that
+        # scales yields.
+        #
+        # That form is wrong for us twice over. alphaS is fed to a CALCULATION
+        # with a restricted domain, not used to scale yields, so a wide
+        # multiplicative factor can put SCETlib somewhere it cannot be
+        # evaluated (that is the 2026-09-09 bug: the fit opened at
+        # xparamdefault * offset). And because the reported coordinate is then
+        # alphaS_true / offset, the curvature scales as offset^2, so
+        # sigma(alphaS), the POI row of the covariance and every impact on
+        # alphaS all come out divided by a random number -- leaving only the
+        # RELATIVE uncertainty usable, where the template treatment gave us the
+        # absolute one.
+        #
+        # Additive restores it: a translation has unit Jacobian, so the central
+        # value is hidden while the uncertainty, the covariance and the impacts
+        # are exactly the unblinded ones.
+        self.blind_additive = True
 
         active = set(self._param_order)
         groups = {
