@@ -597,6 +597,19 @@ class SCETlibADParamModel(ParamModel):
             elif kind == "quad":
                 self._rp_quad[i] = True
                 self._rp_c[:, i] = coeffs
+            elif kind == "unit":
+                # value = <cache anchor> + width * theta. The offset is taken
+                # from the anchor rather than written in REPARAM so theta = 0
+                # reproduces it exactly, for any cache, without the map having
+                # to be kept in step with the runcard by hand. Reuses the quad
+                # branch: (c0, c1, 0) IS this linear map, so no new TF path.
+                (width,) = coeffs
+                self._rp_quad[i] = True
+                self._rp_c[:, i] = (
+                    float(self._anchor[self._fit_idx[i]]),
+                    float(width),
+                    0.0,
+                )
             else:
                 raise ValueError(f"params.REPARAM: unknown kind {kind!r}")
         self._rp_id = ~(self._rp_log | self._rp_quad)

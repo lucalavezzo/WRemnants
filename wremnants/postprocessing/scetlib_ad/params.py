@@ -67,8 +67,9 @@ def rabbit_name(scetlib_name):
         return PDF_PREFIX_OUT + scetlib_name[len(PDF_PREFIX_IN) :]
     raise KeyError(
         f"scetlib_ad.params: no rabbit name for SCETlib parameter "
-        f"{scetlib_name!r}. Add it to EXPLICIT_NAMES (and give it a prior in "
-        f"PRIOR_SIGMAS / a group in IMPACT_GROUP_MEMBERS)."
+        f"{scetlib_name!r}. Add it to EXPLICIT_NAMES, decide whether it is FREE "
+        f"or constrained (FREE_PARAMS), and give it a group in "
+        f"IMPACT_GROUP_MEMBERS."
     )
 
 
@@ -95,59 +96,63 @@ def scetlib_name(rabbit):
 # theta is normalised upstream so |theta|=1 IS the recommended variation
 # (prod/scetlib_run/examples/theory_nuisance_parameters/*.conf) -- and get
 # sigma = 1 by default, unlike the free lambdas.
-PRIOR_SIGMAS = {
-    "alphaS": None,
-    "lambda2": 0.50,
-    "lambda4": 0.50,
-    "lambda6": 0.10,
-    "delta_lambda2": 0.50,
-    "lambda_inf": None,
-    "lambda2_nu": 0.10,
-    "lambda4_nu": 0.50,
-    "lambda6_nu": 0.10,
-    "lambda_inf_nu": None,
-    "b0_over_bmax_nu": None,
-    # --- profile scales and transition points -------------------------------
-    # These REPLACE card nuisances, so their priors have to reproduce the
-    # variation the card encodes, and two of the three only do so approximately.
-    #
-    # resumScaleMuF: exact. The muF pair is built at kappa_F = 0.5 / 2.0 and
-    #   interpolated in t = ln(kappa_F)/ln(muf_hi), so the direction is already
-    #   unit-normalised and |theta| = 1 IS the card's variation.
-    # resumScaleMuR: APPROXIMATE. The parameter is kappa_R itself, central 1 and
-    #   linear, while the card varies kappaFO by x2 and /2. sigma = 0.5 gives
-    #   +-1 sigma = [0.5, 1.5], so the up-variation is understated ([0.5, 2.0]).
-    #   A log-parametrised kappa_R would fix this properly; until then this is a
-    #   deliberate approximation, not an equivalence.
-    # resumTransition2: APPROXIMATE. Central 0.6, the card's variations are
-    #   0.35 and 0.75 (variations_resummed.conf [35]/[36]), i.e. -0.25/+0.15;
-    #   0.2 is the symmetric stand-in.
-    # resumTransition1/3 are FROZEN by default -- the analysis varies only the
-    #   CENTRAL transition point ("new recommendation from Frank for variation of
-    #   central transition parameter only"), so floating the outer two would ADD
-    #   uncertainty the card does not carry.
-    # resumScaleMuR / MuF / Transition2 are reparametrised unit nuisances --
-    # see REPARAM below; prior_sigma() returns 1.0 for them.
-    "resumTransition1": None,
-    "resumTransition3": None,
-}
-TNP_PRIOR_SIGMA = 1.0
+# NOTE the units. These sigmas are in RABBIT's parameter units, which for a
+# REPARAM'd name is theta, not the physical variable. So a reparametrised
+# parameter whose map already carries the physical scale wants sigma = 1.0 --
+# |theta| = 1 IS 1 sigma, the same convention as the TNPs and pdfEig* -- and
+# leaving the old PHYSICAL width here instead would silently tighten the prior
+# by a factor of that width (lambda2 would go from 0.4 +- 0.5 to 0.4 +- 0.25).
+# The physical widths the analysis chose now live in REPARAM as the map widths.
+# Which parameters are FREE. Everything else is constrained at sigma = 1.
+#
+# That is the whole declaration, and it is deliberately a SET rather than a
+# {name: sigma} table. A table invites the units bug: sigma is in RABBIT's
+# units, which for a reparametrised name is theta, so a physical width left
+# there gets multiplied by the map's width and the prior silently shrinks
+# (lambda2 went from 0.4 +- 0.5 to 0.4 +- 0.25 exactly this way). With every
+# constrained parameter at sigma = 1 there is no number here to get wrong: the
+# physical 1 sigma is the REPARAM width, in one place, and
+#
+#     physical 1 sigma = width x sigma = width.
+#
+# A parameter with no REPARAM entry is already unit-normalised upstream -- the
+# TNPs carry an N(0,1) constraint by construction, and pdfEig* have their CL
+# convention in the coefficient map -- so sigma = 1 is right for them too, and
+# they need no entry anywhere.
+#
+# Notes on the free ones:
+#   alphaS            the POI.
+#   lambda_inf, lambda_inf_nu, b0_over_bmax_nu
+#                     shape constants of the NP form, frozen by default (see
+#                     DEFAULT_FROZEN); free rather than constrained so a study
+#                     that deliberately floats one is not fighting a prior it
+#                     did not choose.
+#   resumTransition1/3
+#                     the analysis varies only the CENTRAL transition point
+#                     ("new recommendation from Frank for variation of central
+#                     transition parameter only"), so floating the outer two
+#                     would ADD uncertainty the card does not carry. Frozen by
+#                     default; no reference variation exists to normalise them
+#                     against, which is also why they have no REPARAM map.
+FREE_PARAMS = frozenset(
+    {
+        "alphaS",
+        "lambda_inf",
+        "lambda_inf_nu",
+        "b0_over_bmax_nu",
+        "resumTransition1",
+        "resumTransition3",
+    }
+)
 
 
 def prior_sigma(rabbit):
-    """Default Gaussian prior sigma for a rabbit-facing name (None = free)."""
-    if rabbit in REPARAM:
-        # Unit nuisance by construction: the map carries the physical range, so
-        # theta = +-1 IS the variation the replaced template encoded.
-        return 1.0
-    if rabbit.startswith(TNP_PREFIX_OUT):
-        return TNP_PRIOR_SIGMA
-    if rabbit.startswith(PDF_PREFIX_OUT):
-        # Hessian eigenvector coefficients: theta = +-1 IS 1 sigma, because
-        # pdf_coeff_scale() puts the CL convention in the coefficient map
-        # (theta -> c_e = scale * theta), not in the prior width. See below.
-        return 1.0
-    return PRIOR_SIGMAS.get(rabbit, None)
+    """Gaussian prior sigma in RABBIT's units: None if free, else 1.0.
+
+    There is no per-parameter width here by design -- see FREE_PARAMS. The
+    physical width lives in REPARAM, so this answers only "is it constrained".
+    """
+    return None if rabbit in FREE_PARAMS else 1.0
 
 
 # --- PDF confidence-level convention -----------------------------------------
@@ -262,6 +267,39 @@ REPARAM = {
     # resumTransition1/3 are deliberately NOT reparametrised: they are frozen by
     # default and no reference variation exists for them, so a study that floats
     # them should do so in the physical variable and choose its own range.
+    #
+    # --- "unit": value = <cache anchor> + width * theta -----------------------
+    #
+    # The remaining physical parameters. Before this, alphaS and the five NP
+    # lambdas were the only ones rabbit saw in physical units, which is what
+    # made them the odd ones out: 41 of 47 fitted parameters were already unit
+    # nuisances. Normalising them keeps rabbit generic (it only ever sees
+    # theta ~ O(1)) and collapses the curvature spread that made the
+    # preconditioner necessary -- one block had max|diag| = 3.3e+09 against
+    # singletons at exactly 1, and that nine-order range IS this units mismatch.
+    #
+    # c0 is NOT written here: the model fills it from the CACHE ANCHOR, so
+    # theta = 0 reproduces the anchor by construction and cannot drift when a
+    # cache is built at a different tune. Only the width is a choice, and it is
+    # the parameter's own natural step:
+    #   alphaS        the PDF set's alphasRange (0.002 for CT18Z) -- exactly the
+    #                 Delta(alpha_s)-per-theta convention the pdfAlphaS template
+    #                 used, so theta here means what it meant before.
+    #   the lambdas   their PRIOR_SIGMAS widths, so |theta| = 1 is 1 sigma of the
+    #                 prior the analysis already chose.
+    "alphaS": ("unit", (0.002,)),
+    "lambda2": ("unit", (0.50,)),
+    "lambda4": ("unit", (0.50,)),
+    "delta_lambda2": ("unit", (0.50,)),
+    "lambda2_nu": ("unit", (0.10,)),
+    # lambda6 / lambda6_nu: the tanh_6 form's third coefficient. Only active
+    # when np_model / np_model_nu selects tanh_6, but reparametrised anyway so
+    # that EVERY constrained parameter obeys the same rule -- sigma = 1 in
+    # theta, physical width in the map. Leaving one physical is how a prior gets
+    # silently rescaled the next time someone adds a map to it.
+    "lambda6": ("unit", (0.10,)),
+    "lambda6_nu": ("unit", (0.10,)),
+    "lambda4_nu": ("unit", (0.50,)),
 }
 
 
