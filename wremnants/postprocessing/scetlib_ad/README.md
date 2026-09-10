@@ -110,6 +110,94 @@ is bit-identical (the entries are exactly 0 and 1) and free at these sizes.
 Fixing it upstream — densifying the incoming cotangent before `.numpy()` in
 `_uhvp_py` — would remove the trap rather than leave us relying on a comment.
 
+## The anchor: the correction is the authority
+
+The model returns `rnorm = σ_gen(p) / σ_gen(p_anchor)`, and rabbit **multiplies
+the card's templates** by it. Those templates were reweighted by a theory
+correction produced from SCETlib, so `rnorm = 1` at the fit start only if
+`p_anchor` is the point *that correction* was computed at. The anchor is
+therefore defined by the correction, and the cache — a different SCETlib
+artefact — does not get to define it. This is not a preference; it is forced by
+what the model returns.
+
+Be precise about what depends on where the cache was **built**. Correctness of
+the ratio is about where the cache is **evaluated**, which is `p_anchor`. The
+build point affects *robustness* only, and only for the member-served
+parameters: the 8 NP λ and the 10 TNPs ride the AD tape and are exact anywhere,
+while `alphaS` comes from a PDF α_s member pair and the eigenvectors are exact
+at `c_e = 0, ±1` and interpolated between.
+
+So:
+
+* the histmaker records the **whole resummed runcard verbatim** under
+  `scetlib_corr_config` (`lambda_central.build_corr_config_meta`), alongside the
+  older curated NP extract; verbatim, so a later edit to the correction pkl
+  cannot change what an existing output means;
+* the model builds the anchor from it (`params.CORR_ANCHOR_KEYS`) and **refuses**
+  a card that records none — the central values would be unknown, and taking
+  them from the cache is the silent failure the refusal exists to prevent;
+* `anchor_source=cache` is the opt-out. Deliberately a *word*, not an off
+  switch: it declares "predict around the cache's build point even though the
+  templates were built elsewhere", which someone has to own. Logged loudly.
+
+Why the refusal is worth its inconvenience: a wrong anchor is **invisible**. The
+ratio is 1 at the fit start either way, so every prefit plot looks perfect and
+only the derivatives are wrong, perturbing around the wrong origin. The α_s
+blinding bug found on 2026-09-09 was exactly this shape — SCETlib was being
+evaluated at α_s = 1.7e-05, the starting loss was 4.6e7 against a converged 361,
+and no check fired.
+
+### What is checked, and what is not
+
+The cache's own runcard is compared against the recorded one on load. The
+comparison covers a **curated positive list** (`params.CORR_REFUSE_KEYS`,
+`CORR_WARN_KEYS`), not everything available, and nothing outside it is reported
+at all — an allowlist has to be maintained against a config that keeps growing,
+and a report nobody acts on trains people to ignore the output.
+
+| class | what | on mismatch |
+|---|---|---|
+| REFUSE | the PDF (`pdf_set`, `pdf_member`); the orders (`alphas_order`, `nf`, `run_order`, `fixed_order`); what the parameters MEAN (`np_model*`, TNP modes, `form_np_prescription`, `profile_functional_form`, the b\* prescription, `kappafo`/`kappaf`, the profile floors, `Electroweak`, `Process.boson`) | raise — the cache computes a different function and no parameter value reconciles it |
+| WARN | parameter VALUES: every shared numeric `Nonperturbative` key, the TNP values, `transition_points`, `alphas_mu0` | log; the anchor follows the **correction** |
+| not compared | `Grid_*` (the fit's range vs the production grid), `Integration` (quadrature accuracy), `calculation_piece` (`sing` vs `matched` by construction), and anything on neither list | nothing |
+
+Two asymmetries worth knowing:
+
+* the WARN class is benign for the λ and TNPs (the tape is exact away from the
+  build point) but **not** for `alphas_mu0`, which is interpolated — warning
+  there is accepted interpolation error, not a free pass;
+* the cache side is `core.conf`, i.e. the runcard *layered on SCETlib's*
+  `defaults.conf`, because that is what the calculation is configured from.
+  Against the bare runcard file, 33 of the correction's 107 keys have no
+  counterpart at all — the per-flavour `lambda2_*`, `lambda4_i`, `lambda6`,
+  `lambda6_nu`, `np_model_tmd`, `kappafo` — and those are exactly the ones a
+  build-default difference would hide. Layered, all 107 have a counterpart;
+* and the comparison iterates the **correction's** keys, so keys only the
+  *cache* carries are never visited — a key the correction lacks has no value to
+  disagree with. Measured, that is **12** keys and every one is fixed-order /
+  matching machinery (`fo_order2_*`, `matched_nons_qt_cut`). Not an accidental
+  gap: `calculation_piece` is `matched` against `sing` by construction, so those
+  knobs exist *because* of that difference and sit inside the fixed-order
+  exclusion below. (`fo_order2_analytic` is `yes` in the cache runcard, `no` in
+  today's `defaults.conf`, and absent entirely from the correction's resolved
+  config — the build that made the correction predates the knob.)
+
+There is **no `defaults.conf` fallback for an anchor-bearing value**, and that is
+deliberate. A runcard can keep a compiled-in default with no runtime key: an
+older `tanh_6` build hardcoded the CS-side `lambda_6_nu` at 0.0007 while this
+checkout defaults it to 0. A fallback would quietly hand over the wrong anchor.
+A missing anchor value refuses instead, and the one escape is auditable —
+`anchor_override=lambda6_nu=0.0007`, recorded in the fit's spec and printed at
+construction.
+
+Finally, `--theoryCorrAltOnly` refuses regardless of `anchor_source`: the nominal
+templates then carry no correction at all, so there is no correction anchor for
+them and the recorded config describes a prediction they never saw.
+
+Not covered, stated so we are not fooling ourselves: the **fixed-order half** of
+a `scetlib_dyturbo` correction. Only the resummed file's runcard is recorded, so
+"the correction is the authority" holds for the resummed sector.
+
 ## Validating a cache
 
 Two independent checks, both cheap relative to a fit:

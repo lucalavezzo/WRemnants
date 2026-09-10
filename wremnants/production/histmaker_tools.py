@@ -154,40 +154,63 @@ def analysis_debug_output(results):
     logger.debug("")
 
 
-def _add_scetlib_np_lambda_central(meta_info, args):
-    """Record the NP anchor the theory correction was generated at.
+def _add_scetlib_corr_meta(meta_info, args):
+    """Record what the SCETlib theory correction was generated at.
 
-    The scetlib_ad ParamModel needs to know which lambda values the templates
-    were built with, so it can refuse a cache built at a different tune. That
-    mismatch is otherwise INVISIBLE -- the model's ratio is exactly 1 at the fit
-    start regardless -- so the anchor is the only thing standing between us and
-    a silently wrong fit. See scetlib_ad/lambda_central.py.
+    The scetlib_ad ParamModel predicts ``sigma_gen(p) / sigma_gen(p_anchor)``,
+    which MULTIPLIES the templates written here. The ratio is 1 only if
+    ``p_anchor`` is the point THIS correction was computed at, so the fit cannot
+    know what its own denominator means without these entries -- and a wrong
+    anchor is invisible downstream, because the ratio is 1 at the fit start
+    either way. See scetlib_ad/lambda_central.py.
+
+    Two entries, both from the resummed runcard inside the correction pkl:
+
+    * ``scetlib_np_lambda_central`` -- the curated NP extract, kept for readers
+      that already consume it.
+    * ``scetlib_corr_config`` -- the whole runcard verbatim, which is what the
+      fit reads its central values off. Verbatim so that a later edit to the
+      correction pkl cannot change what this output means.
 
     A missing or unparsable correction is not an error: most analyses have no
-    SCETlib NP correction. But it is logged at WARNING, not swallowed, because
-    the whole point is that its absence is undetectable downstream.
+    SCETlib NP correction, and a histmaker must not fail over metadata. But it
+    is logged at WARNING, not swallowed, because the whole point is that its
+    absence is undetectable downstream.
     """
     theory_corr = getattr(args, "theoryCorr", None)
     if not theory_corr:
         return
+    # --theoryCorrAltOnly carries the correction as ALTERNATES only, so the
+    # nominal templates are uncorrected and there is no correction anchor for
+    # them. Record the fact rather than the silence: a fit that read these
+    # entries without it would anchor on a prediction the templates never saw.
+    applied = not bool(getattr(args, "theoryCorrAltOnly", False))
     try:
         from wremnants.postprocessing.scetlib_ad import lambda_central
 
         lc_meta = lambda_central.build_lambda_central_meta(theory_corr)
+        cfg_meta = lambda_central.build_corr_config_meta(
+            theory_corr, applied_to_nominal=applied
+        )
         if lc_meta:
             meta_info[lambda_central.META_KEY] = lc_meta
+        if cfg_meta:
+            meta_info[lambda_central.CORR_CONFIG_META_KEY] = cfg_meta
+        if lc_meta or cfg_meta:
             logger.info(
-                f"Recorded NP anchor ({lambda_central.META_KEY}) for procs "
-                f"{sorted(lc_meta)}"
+                f"Recorded SCETlib correction anchor for procs "
+                f"{sorted(set(lc_meta) | set(cfg_meta))} "
+                f"(applied_to_nominal={applied})"
             )
         else:
             logger.warning(
-                f"No NP anchor recorded for theoryCorr {theory_corr[0]!r}: no "
-                "correction pkl with a Nonperturbative section. A scetlib_ad "
-                "fit built on this output cannot cross-check its cache anchor."
+                f"No SCETlib correction anchor recorded for theoryCorr "
+                f"{theory_corr[0]!r}: no correction pkl with a Nonperturbative "
+                "section. A scetlib_ad fit built on this output has no anchor "
+                "and will refuse to run."
             )
     except Exception as exc:  # noqa: BLE001 -- never fail a histmaker for this
-        logger.warning(f"Could not record the NP anchor: {exc}")
+        logger.warning(f"Could not record the SCETlib correction anchor: {exc}")
 
 
 def write_analysis_output(results, outfile, args, name_append=[]):
@@ -240,7 +263,7 @@ def write_analysis_output(results, outfile, args, name_append=[]):
 
         if "meta_info" not in f.keys():
             meta_info = output_tools.make_meta_info_dict(args=args, wd=common.base_dir)
-            _add_scetlib_np_lambda_central(meta_info, args)
+            _add_scetlib_corr_meta(meta_info, args)
             ioutils.pickle_dump_h5py("meta_info", meta_info, f)
 
     logger.info(f"Writing output: {time.time()-time0}")

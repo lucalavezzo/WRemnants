@@ -87,14 +87,15 @@ import tensorflow as tf
 
 from rabbit.param_models.param_model import ParamModel
 from wremnants.postprocessing.scetlib_ad import params as adp
+from wremnants.postprocessing.scetlib_ad import response as response_mod
 from wremnants.postprocessing.scetlib_ad.response import (
     DEFAULT_RESPONSE_GROUP,
     RATIO_FLOOR_MIN,
     RATIO_FLOOR_SCALE,
     R_info_from_auxiliary,
+    corr_config_from_meta,
     crop_R_to_fit,
     marginalize_R_reco,
-    np_anchor_from_meta,
 )
 from wremnants.postprocessing.scetlib_ad.xsec_backend import ScetlibADXsec
 
@@ -218,8 +219,8 @@ class SCETlibADParamModel(ParamModel):
         prior_sigmas=None,
         xparam_default=None,
         pdf_coeff_scale=None,
-        check_anchor=True,
-        anchor_tol=1e-6,
+        anchor_source="correction",
+        anchor_override=None,
         response_group=DEFAULT_RESPONSE_GROUP,
         **kwargs,
     ):
@@ -245,7 +246,7 @@ class SCETlibADParamModel(ParamModel):
             Comma-separated rabbit-facing names to expose to the fit. Default:
             every parameter the cache carries except ``params.DEFAULT_FROZEN``
             (the tanh saturation scales and the b* convention, which are shape
-            constants). Parameters not listed are held at their cache anchor and
+            constants). Parameters not listed are held at their anchor and
             never reach rabbit, so they cannot contribute a zero-derivative
             (singular) Hessian row.
         poi_params
@@ -264,7 +265,7 @@ class SCETlibADParamModel(ParamModel):
             parameter.
         xparam_default
             ``name=value,...`` shifting the fit START (and the prior mean) off
-            the cache anchor, for injection / closure tests. The ratio
+            the anchor, for injection / closure tests. The ratio
             DENOMINATOR is not moved -- it always stays the anchor.
         pdf_coeff_scale
             Confidence-level convention for the PDF eigenvector coefficients:
@@ -275,13 +276,32 @@ class SCETlibADParamModel(ParamModel):
             is the same product ``add_pdf_uncertainty`` applies to the templates
             this replaces. Pass 1 to switch it off (theta = +-1 is then the raw
             member, i.e. 90% CL for CT18Z), or a float to override.
-        check_anchor
-            Cross-check the cache anchor against the nonperturbative values the
-            card records for its own prediction. An anchor that disagrees
-            is the silent-wrong-answer trap documented in
+        anchor_source
+            Where the parameter central values come from. ``"correction"``
+            (default) reads them off the theory correction the card's templates
+            were reweighted with, which is the only self-consistent choice: the
+            model's prediction is a ratio to the anchor MULTIPLYING those
+            templates, so the anchor is whatever the correction used. A card
+            that records no correction config is then a hard error, because the
+            central values are unknown and the cache must not be allowed to
+            invent them.
+
+            ``"cache"`` takes them from the cache instead. Deliberately a word
+            rather than an off switch -- it declares a physics choice someone
+            owns, namely "predict around the cache's own build point even though
+            the templates were built somewhere else". That is the
+            silent-wrong-answer trap documented in
             ``knowledge/20_frameworks/gen_level_sigmaul_fit.md``: the ratio is
             still 1 at the start, so nothing looks broken, but the response is
-            evaluated at the wrong point.
+            evaluated at the wrong point. Logged loudly every time.
+        anchor_override
+            ``name=value,...`` supplying a central value the correction does not
+            record, for the one case where neither artefact has it: a runcard
+            whose NP form kept a COMPILED-IN default with no runtime key (an
+            older ``tanh_6`` build hardcoded the CS-side ``lambda_6_nu`` at
+            0.0007 and offered no way to set it). Overriding is auditable --
+            recorded in the fit's spec and printed at construction -- where
+            falling back to ``defaults.conf`` would quietly hand over 0.
         """
         self.indata = indata
         if cache is None or conf is None:
@@ -298,7 +318,10 @@ class SCETlibADParamModel(ParamModel):
         self.core = ScetlibADXsec(conf, cache, threads=threads)
         self.scetlib_names = list(self.core.param_names)
         self.rabbit_names = [adp.rabbit_name(n) for n in self.scetlib_names]
-        self._anchor = np.asarray(self.core.anchor, dtype=np.float64)
+        # ---- The anchor: the point the prediction is a RATIO TO. It comes
+        # from the theory correction the card's templates carry, NOT the
+        # cache -- see params.CORR_ANCHOR_KEYS.
+        self._anchor = self._resolve_anchor(anchor_source, anchor_override)
 
         # ---- Gen binning, and (reco path) the response matrix.
         self._setup_binning(indata, Q_lo, Q_hi)
@@ -330,8 +353,6 @@ class SCETlibADParamModel(ParamModel):
                     f"R and the fit-tensor reco axes."
                 )
 
-        if check_anchor:
-            self._check_anchor_against_card(anchor_tol)
         self._check_double_counting()
         self._check_no_inert_params()
 
@@ -598,10 +619,10 @@ class SCETlibADParamModel(ParamModel):
                 self._rp_quad[i] = True
                 self._rp_c[:, i] = coeffs
             elif kind == "unit":
-                # value = <cache anchor> + width * theta. The offset is taken
+                # value = <anchor> + width * theta. The offset is taken
                 # from the anchor rather than written in REPARAM so theta = 0
-                # reproduces it exactly, for any cache, without the map having
-                # to be kept in step with the runcard by hand. Reuses the quad
+                # reproduces it exactly, whatever the correction set, without
+                # the map having to be kept in step by hand. Reuses the quad
                 # branch: (c0, c1, 0) IS this linear map, so no new TF path.
                 (width,) = coeffs
                 self._rp_quad[i] = True
@@ -629,7 +650,7 @@ class SCETlibADParamModel(ParamModel):
             if f
         )
 
-        # Start values: the cache anchor, optionally shifted for injection tests.
+        # Start values: the anchor, optionally shifted for injection tests.
         # _p_base_anchor is the UNSHIFTED full vector and stays the ratio
         # denominator; _p_base carries the shift for the non-fitted slots only
         # (fitted slots are overwritten from the fit vector on every call).
@@ -651,8 +672,12 @@ class SCETlibADParamModel(ParamModel):
                 if abs(a - b) > 1e-12
             ]
             raise ValueError(
-                "scetlib_ad: the REPARAM maps do not reproduce the cache anchor "
-                f"at theta = 0, so sigma_gen/sigma_central would not be 1: {bad}"
+                "scetlib_ad: the REPARAM maps do not reproduce the anchor at "
+                f"theta = 0, so sigma_gen/sigma_central would not be 1: {bad}\n"
+                "    NB the anchor comes from the theory correction, so a "
+                "HARDCODED map offset (resumTransition2's quad c0 = 0.6) that no "
+                "longer matches the correction's own value trips this. That is "
+                "the intended refusal: fix REPARAM, do not move the anchor."
             )
         for name, val in _parse_kv(xparam_default).items():
             if name not in available:
@@ -747,45 +772,216 @@ class SCETlibADParamModel(ParamModel):
             flush=True,
         )
 
-    def _check_anchor_against_card(self, tol):
-        """Compare the cache anchor with the card's propagated lambda_central."""
-        meta = getattr(self.indata, "metadata", None)
-        if not meta:
-            print(
-                "[SCETlibADParamModel] WARNING: the card carries no metadata, so "
-                "the cache anchor could not be cross-checked against the "
-                "nonperturbative values the card was produced with. Pass "
-                "check_anchor=0 to silence, but verify by hand.",
-                flush=True,
-            )
-            return
-        card = np_anchor_from_meta(meta)
-        if not card:
-            print(
-                "[SCETlibADParamModel] WARNING: the card records no "
-                "nonperturbative anchor, so the cache anchor was NOT "
-                "cross-checked.",
-                flush=True,
-            )
-            return
-        mismatched = []
-        for card_key, rabbit in adp.LAMBDA_CENTRAL_KEYS.items():
-            if card_key not in card or rabbit not in self.rabbit_names:
-                continue
-            want = float(card[card_key])
-            have = float(self._anchor[self.rabbit_names.index(rabbit)])
-            if abs(have - want) > tol * max(1.0, abs(want)):
-                mismatched.append((rabbit, want, have))
-        if mismatched:
+    def _cache_config(self):
+        """The cache's runcard as ``{section: {key: str}}``.
+
+        ``core.conf``, not the runcard file: that is the runcard LAYERED ON
+        SCETlib's ``defaults.conf``, which is what the calculation is actually
+        configured from. It matters for coverage. Against the bare file, 33 of
+        the correction's 107 keys have no counterpart and so cannot be compared
+        at all -- the eleven per-flavour ``lambda2_*``, ``lambda4_i``,
+        ``lambda6``, ``lambda6_nu``, ``np_model_tmd``, ``kappafo``,
+        ``transition_type``, ``scale_setting`` -- and those are exactly the ones
+        that would matter if a build defaulted them differently. Against the
+        layered config every one of the 107 has a counterpart (measured
+        2026-09-10), so the blind spot closes.
+
+        The residual asymmetry: these are TODAY's defaults, while the correction
+        side is the config SCETlib resolved when it ran. A ``defaults.conf`` edit
+        since then therefore reads as a real difference -- which, for the cache,
+        it is.
+        """
+        conf = self.core.conf
+        return {section: dict(conf[section]) for section in conf.sections()}
+
+    def _resolve_anchor(self, anchor_source, anchor_override):
+        """The anchor vector over ``self.rabbit_names``, and the config check.
+
+        The prediction is ``sigma_gen(p) / sigma_gen(p_anchor)`` multiplying the
+        card's templates, and those templates were reweighted by a theory
+        correction. So the ratio is 1 at the fit start only if ``p_anchor`` is
+        the point THAT correction was computed at: the correction defines the
+        anchor, and the cache -- a different SCETlib artefact -- does not get to.
+
+        Note precisely what does and does not depend on where the CACHE was
+        built. Correctness of the ratio is about where the cache is EVALUATED,
+        which is this vector. Where it was built affects ROBUSTNESS only: the NP
+        lambdas and TNPs ride the AD tape and are exact anywhere, while alphaS is
+        served by a PDF member pair and the eigenvectors are exact only at
+        c = 0, +-1, so those two degrade with distance.
+        """
+        cache_anchor = np.asarray(self.core.anchor, dtype=np.float64)
+        source = str(anchor_source).strip().lower()
+        if source not in ("correction", "cache"):
             raise ValueError(
-                "SCETlibADParamModel: the cache anchor does not match the card's "
-                "NP central. The ratio would still be 1 at the start, so this "
-                "fails silently -- rebuild the cache at the card's runcard "
-                "values, or the card at the cache's.\n"
-                + "\n".join(
-                    f"    {n}: card {w:.6g} vs cache {h:.6g}" for n, w, h in mismatched
-                )
+                f"SCETlibADParamModel: anchor_source={anchor_source!r} is not "
+                "understood. Use 'correction' (the theory correction the card's "
+                "templates carry -- the default, and the only self-consistent "
+                "choice) or 'cache'."
             )
+
+        entry = corr_config_from_meta(getattr(self.indata, "metadata", None) or {})
+        if entry is None:
+            if source == "cache":
+                print(
+                    "[SCETlibADParamModel] WARNING: anchor_source=cache and the "
+                    "card records no theory-correction config, so the central "
+                    "values are the CACHE's build point and nothing cross-checks "
+                    "them against the templates. The ratio is 1 at the start "
+                    "either way, so a mismatch cannot be seen in any prefit "
+                    "plot. Verify by hand.",
+                    flush=True,
+                )
+                return cache_anchor
+            raise ValueError(
+                "SCETlibADParamModel: the card records no theory-correction "
+                f"config ({response_mod.CORR_CONFIG_META_KEY}), so the parameter "
+                "central values are UNKNOWN. The model predicts a ratio to the "
+                "anchor which multiplies this card's templates, and those "
+                "templates were reweighted by a correction whose settings are "
+                "not recorded here -- so there is nothing to form the ratio "
+                "about. Taking the values from the cache instead is the silent "
+                "failure this refusal exists to prevent: the ratio would still "
+                "be 1 at the fit start.\n"
+                "    Fix: rerun the histmaker with a WRemnants that records it "
+                "(histmaker_tools._add_scetlib_corr_meta).\n"
+                "    Or, deliberately and on your own authority, pass "
+                "anchor_source=cache."
+            )
+
+        # --theoryCorrAltOnly carries the correction as alternates only, so the
+        # nominal templates are UNCORRECTED. There is then no correction anchor
+        # for them at all, which no choice of anchor_source can supply.
+        if not entry.get("applied_to_nominal", True):
+            raise ValueError(
+                "SCETlibADParamModel: the card's histmaker ran with "
+                "--theoryCorrAltOnly, so its nominal templates carry NO theory "
+                "correction. There is no correction anchor for them, and the "
+                "recorded config describes a prediction the templates never "
+                "saw. Rerun the histmaker with the correction applied to the "
+                "nominal."
+            )
+
+        cfg = entry["config"]
+        # _parse_kv takes a "name=value,..." string, a Mapping, or None, and
+        # coerces the values to float either way.
+        overrides = _parse_kv(anchor_override)
+        unknown = [n for n in overrides if n not in self.rabbit_names]
+        if unknown:
+            raise KeyError(
+                f"anchor_override: unknown parameter(s) {unknown}. Registered: "
+                f"{self.rabbit_names}"
+            )
+
+        anchor = cache_anchor.copy()
+        n_corr, structural, missing, uncovered = 0, [], [], []
+        for i, name in enumerate(self.rabbit_names):
+            if name in overrides:
+                anchor[i] = overrides[name]
+                continue
+            where = adp.corr_anchor_key(name)
+            if where is not None:
+                value = adp.corr_anchor_value(cfg, name)
+                if value is None:
+                    missing.append((name, f"{where[0]}.{where[1]}"))
+                else:
+                    anchor[i] = value
+                    n_corr += 1
+                continue
+            central = adp.structural_central(name)
+            if central is not None:
+                anchor[i] = central
+                structural.append(name)
+                continue
+            uncovered.append(name)
+
+        if uncovered:
+            raise ValueError(
+                "SCETlibADParamModel: no stated source for the central value of "
+                f"{uncovered}. The correction-key -> registry map is "
+                "hand-maintained, so this is what a SCETlib rename looks like. "
+                "Add the parameter to params.CORR_ANCHOR_KEYS (if the runcard "
+                "records it) or params.STRUCTURAL_CENTRAL (if its central value "
+                "is fixed by how SCETlib registers it)."
+            )
+        if missing:
+            raise ValueError(
+                "SCETlibADParamModel: the recorded correction config does not "
+                "carry a central value for:\n"
+                + "\n".join(f"    {n} <- {k}" for n, k in missing)
+                + "\nSo the anchor for those parameters is unknown. There is "
+                "deliberately no defaults.conf fallback here: a runcard can keep "
+                "a COMPILED-IN default with no runtime key -- an older tanh_6 "
+                "build hardcoded the CS-side lambda_6_nu at 0.0007 while this "
+                "checkout defaults it to 0 -- so a fallback would quietly hand "
+                "over the wrong anchor, which is the failure this refusal "
+                "exists to prevent.\n"
+                "    If you know the value, state it: "
+                "anchor_override=<name>=<value>. It is then recorded in the "
+                "fit's spec and printed here."
+            )
+
+        # ---- Is the cache the same calculation the templates carry?
+        refuse, warn, corr_only = adp.compare_corr_config(cfg, self._cache_config())
+        shift = np.abs(anchor - cache_anchor)
+        worst = int(np.argmax(shift)) if shift.size else 0
+        print(
+            f"[SCETlibADParamModel] anchor from the theory correction "
+            f"{entry.get('tag')!r} ({entry.get('basename')}): {n_corr} of "
+            f"{len(self.rabbit_names)} central values read from its runcard, "
+            f"{len(structural)} fixed by SCETlib's registration "
+            f"(resumScaleMuR/MuF at 1, pdfEig* at 0)"
+            + (f", {len(overrides)} overridden {dict(overrides)}" if overrides else "")
+            + f". Largest shift from the cache's own anchor: "
+            f"{self.rabbit_names[worst]} {shift[worst]:.3g}. "
+            f"Config cross-check: {len(refuse)} refusing, {len(warn)} warning, "
+            f"{len(corr_only)} key(s) the cache runcard does not carry (SCETlib "
+            f"defaults, not compared).",
+            flush=True,
+        )
+        if corr_only:
+            print(
+                f"[SCETlibADParamModel] not compared (correction-only): "
+                f"{corr_only}",
+                flush=True,
+            )
+        if warn:
+            print(
+                "[SCETlibADParamModel] WARNING: the cache runcard disagrees with "
+                "the correction on these parameter VALUES. The anchor above "
+                "follows the CORRECTION, which is right -- the tape is exact "
+                "away from the cache's build point, so a lambda or TNP mismatch "
+                "is benign. alphaS is the exception: it is served by an "
+                "interpolated PDF member pair, so a mismatch there is accepted "
+                "interpolation error, not a free pass.\n"
+                + "\n".join(
+                    f"    {n}: correction {c!r} vs cache {h!r}" for n, c, h in warn
+                ),
+                flush=True,
+            )
+        if refuse:
+            raise ValueError(
+                "SCETlibADParamModel: the cache was built from a DIFFERENT "
+                "calculation than the theory correction the card's templates "
+                "carry, so no parameter value can reconcile them:\n"
+                + "\n".join(
+                    f"    {n}: correction {c!r} vs cache {h!r}" for n, c, h in refuse
+                )
+                + "\nRebuild the cache from the correction's runcard, or the "
+                "card from a histmaker using the cache's."
+            )
+
+        if source == "cache":
+            print(
+                "[SCETlibADParamModel] WARNING: anchor_source=cache -- the "
+                "central values above are DISCARDED and the cache's own build "
+                "point is used instead, even though the card's templates were "
+                "reweighted at the correction's. Nothing downstream can see the "
+                "difference (the ratio is 1 at the start either way).",
+                flush=True,
+            )
+            return cache_anchor
+        return anchor
 
     def _check_no_inert_params(self):
         """Refuse a fitted parameter the prediction does not depend on.

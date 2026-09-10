@@ -41,6 +41,7 @@ sys.path.insert(
     ),
 )
 
+from wremnants.postprocessing.scetlib_ad import params as adp  # noqa: E402
 from wremnants.postprocessing.scetlib_ad.validation_plots import (  # noqa: E402
     ratio_range,
     warn_if_clipped,
@@ -306,45 +307,34 @@ def _restrict(edges, spec, what):
 
 
 def _report_config(cfg, core):
-    """Cross-check the settings we transcribed against the reference's own."""
+    """Cross-check the cache against the reference run's own settings.
+
+    Uses the SAME tables the fit uses (``params.compare_corr_config``) rather
+    than a list local to this script. The local list had drifted: it compared
+    Nonperturbative in full but Calculation_settings against only twelve
+    hand-picked keys, and never touched QCD at all -- where ``pdf_set`` and
+    ``alphas_mu0`` live.
+    """
     if not cfg:
         print("   (the reference records no config; nothing to cross-check)")
         return
-    # configparser lowercases keys, so compare case-insensitively or every
-    # camelCase setting reads as missing.
-    rc = {k.lower(): v for k, v in cfg.get("Calculation_settings", {}).items()}
-    oc = {k.lower(): v for k, v in dict(core.conf["Calculation_settings"]).items()}
-    rn = {k.lower(): v for k, v in cfg.get("Nonperturbative", {}).items()}
-    on = {k.lower(): v for k, v in dict(core.conf["Nonperturbative"]).items()}
-    diff = [
-        (k, rc[k], oc.get(k))
-        for k in (
-            "lambda",
-            "transition_points",
-            "mu0_min",
-            "mub_min",
-            "mus_min",
-            "muf_min",
-            "compensate_fo",
-            "form_np_prescription",
-            "muf_follows_mub",
-            "disable_asymmetry",
-            "run_order",
-            "fixed_order",
-        )
-        if k in rc and not _same(rc[k], oc.get(k))
-    ]
-    npdiff = [
-        (k, v, on.get(k)) for k, v in rn.items() if k in on and not _same(v, on[k])
-    ]
+    ours = {section: dict(core.conf[section]) for section in core.conf.sections()}
+    theirs = {
+        str(section): {str(k).lower(): v for k, v in body.items()}
+        for section, body in cfg.items()
+        if isinstance(body, dict)
+    }
+    refuse, warn, ref_only = adp.compare_corr_config(theirs, ours)
     print(
         f"   settings cross-check: "
-        f"{'OK' if not diff else f'{len(diff)} DIFFER: {diff}'}"
+        f"{'OK' if not refuse else f'{len(refuse)} DIFFER (would REFUSE a fit): {refuse}'}"
     )
     print(
-        f"   NP anchor cross-check: {len(rn)} entries, "
-        f"{'all agree' if not npdiff else f'DIFFER: {npdiff}'}"
+        f"   parameter values: "
+        f"{'all agree' if not warn else f'{len(warn)} DIFFER: {warn}'}"
     )
+    if ref_only:
+        print(f"   not compared ({len(ref_only)} reference-only): {sorted(ref_only)}")
 
 
 def _plot(ours_c, ref_c, Ye, Te, args, kind):
@@ -436,15 +426,6 @@ def _plot(ours_c, ref_c, Ye, Te, args, kind):
         )
 
     print(f"\n   plots -> {args.plot_dir}")
-
-
-def _same(a, b):
-    if a is None or b is None:
-        return a == b
-    try:
-        return abs(float(str(a).strip()) - float(str(b).strip())) < 1e-9
-    except ValueError:
-        return str(a).strip().lower() == str(b).strip().lower()
 
 
 if __name__ == "__main__":

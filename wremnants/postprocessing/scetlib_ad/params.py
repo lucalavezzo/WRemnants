@@ -13,6 +13,7 @@ fit-summary tools and the impact-group labels work unchanged. ``alphas`` becomes
 Delta(alpha_s) = 0.002-per-theta convention.
 """
 
+import ast
 import math
 
 # --- SCETlib gradient name -> rabbit-facing name -----------------------------
@@ -68,8 +69,9 @@ def rabbit_name(scetlib_name):
     raise KeyError(
         f"scetlib_ad.params: no rabbit name for SCETlib parameter "
         f"{scetlib_name!r}. Add it to EXPLICIT_NAMES, decide whether it is FREE "
-        f"or constrained (FREE_PARAMS), and give it a group in "
-        f"IMPACT_GROUP_MEMBERS."
+        f"or constrained (FREE_PARAMS), give it a group in "
+        f"IMPACT_GROUP_MEMBERS, and say where its anchor comes from "
+        f"(CORR_ANCHOR_KEYS / STRUCTURAL_CENTRAL)."
     )
 
 
@@ -414,24 +416,372 @@ def pdf_group(names):
     return tuple(n for n in names if n.startswith(PDF_PREFIX_OUT))
 
 
-# --- lambda_central cross-check ----------------------------------------------
+# --- The correction is the authority for the central values -------------------
 #
-# A histmaker output records the nonperturbative values its theory correction was
-# generated at, under two sub-dicts using the histmaker's own spelling, and that
-# is propagated into the datacard. Map those names onto rabbit-facing ones so the
-# card's anchor can be compared against the cache's.
-LAMBDA_CENTRAL_KEYS = {
-    # card metadata key -> rabbit-facing name (identical here, but
-    # spelled out so a future divergence is a one-line fix rather than a silent
-    # mismatch)
-    "lambda2": "lambda2",
-    "lambda4": "lambda4",
-    "lambda6": "lambda6",
-    "delta_lambda2": "delta_lambda2",
-    "lambda_inf": "lambda_inf",
-    "lambda2_nu": "lambda2_nu",
-    "lambda4_nu": "lambda4_nu",
-    "lambda6_nu": "lambda6_nu",
-    "lambda_inf_nu": "lambda_inf_nu",
-    "b0_over_bmax_nu": "b0_over_bmax_nu",
+# The model returns ``sigma_gen(p) / sigma_gen(p_anchor)``, which MULTIPLIES the
+# card's templates. Those templates were reweighted by a theory correction, so
+# the ratio is 1 at the fit start only if ``p_anchor`` is the point THAT
+# correction was computed at. The anchor is therefore defined by the correction,
+# not by the cache: we are applying a ratio on top of what the histmaker already
+# produced, so we must know what the histmaker used. Without it there is nothing
+# to form the ratio about.
+#
+# Note precisely what does and does not depend on where the CACHE was built. The
+# ratio is correct insofar as the cache is EVALUATED at the correction's point,
+# which is a statement about ``p_anchor`` alone. Where the cache was built
+# affects ROBUSTNESS: the NP lambdas and the TNPs are AD-tape-carried and exact
+# anywhere, while ``alphaS`` is member-served and the PDF eigenvectors are exact
+# only at c = 0, +-1, so only those degrade away from the build point.
+#
+# The histmaker records the whole resummed runcard verbatim
+# (``lambda_central.CORR_CONFIG_META_KEY``) and these tables say what to do with
+# it: where each registry parameter's central value comes from, and which
+# settings must agree for the cache to be the same calculation at all.
+
+# Where each registry parameter's anchor lives in the correction's runcard, as
+# ``(section, key, index)``. ``index`` selects one element of a list-valued
+# setting (the three transition points) or of a ``(value, mode)`` TNP tuple;
+# ``None`` takes the whole value. The TNP family is handled by prefix in
+# :func:`corr_anchor_key`, so this table holds only the named parameters.
+#
+# Measured against the real cache (53 registered names, 2026-09-10): 1 alphaS
+# + 8 NP lambdas + 10 TNPs + 5 profile/transition + 29 pdfEig. Every one is
+# covered here or by :func:`structural_central`; the leftover set is empty, and
+# :func:`uncovered_params` is what keeps that true.
+CORR_ANCHOR_KEYS = {
+    "alphaS": ("QCD", "alphas_mu0", None),
+    "lambda_inf": ("Nonperturbative", "lambda_inf", None),
+    "lambda2": ("Nonperturbative", "lambda2", None),
+    "lambda4": ("Nonperturbative", "lambda4", None),
+    "lambda6": ("Nonperturbative", "lambda6", None),
+    "delta_lambda2": ("Nonperturbative", "delta_lambda2", None),
+    "lambda_inf_nu": ("Nonperturbative", "lambda_inf_nu", None),
+    "lambda2_nu": ("Nonperturbative", "lambda2_nu", None),
+    "lambda4_nu": ("Nonperturbative", "lambda4_nu", None),
+    "lambda6_nu": ("Nonperturbative", "lambda6_nu", None),
+    "b0_over_bmax_nu": ("Nonperturbative", "b0_over_bmax_nu", None),
+    # SCETlib registers the transition points individually but the runcard
+    # carries them as one list, so each takes its own element.
+    "resumTransition1": ("Calculation_settings", "transition_points", 0),
+    "resumTransition2": ("Calculation_settings", "transition_points", 1),
+    "resumTransition3": ("Calculation_settings", "transition_points", 2),
 }
+
+# Parameters whose central value is fixed by how SCETlib REGISTERS them, so the
+# runcard neither carries it nor could disagree with it:
+#   resumScaleMuR/MuF   ad_context.cpp registers scale_kappa_R and scale_kappa_F
+#                       with a hardcoded central of 1. They are multiplicative
+#                       factors ON TOP of whatever the runcard's kappafo /
+#                       kappaf set, so 1 is "the runcard's own scale choice".
+#                       (kappafo / kappaf themselves are structural and sit in
+#                       CORR_REFUSE_KEYS.)
+#   pdfEig*             0 is the central member, which is what pdf_member = 0
+#                       means; the coefficients are displacements from it.
+STRUCTURAL_CENTRAL = {
+    "resumScaleMuR": 1.0,
+    "resumScaleMuF": 1.0,
+}
+
+# --- What we declared ahead of time to matter --------------------------------
+#
+# REFUSE: the cache computes a different FUNCTION, so no parameter move
+# recovers it. Four groups, and the test for each is "would a difference here
+# mean the cache is not the calculation the histmaker's templates carry?".
+CORR_REFUSE_KEYS = frozenset(
+    {
+        # (2) The PDF. A different set is a different calculation entirely, and
+        # the cache's eigenvector and alpha_s columns are built from its members.
+        "QCD.pdf_set",
+        "QCD.pdf_member",
+        # (3) Perturbative content: what orders were computed.
+        "QCD.alphas_order",
+        "QCD.nf",
+        "Calculation_settings.fixed_order",
+        "Calculation_settings.run_order",
+        # (4) What the parameters MEAN. The same number under a different
+        # functional form or mode is a different prediction -- the group easiest
+        # to forget, hence the length.
+        #   the NP form: the tape computes a different function
+        "Nonperturbative.np_model",
+        "Nonperturbative.np_model_nu",
+        "Nonperturbative.np_model_tmd",
+        #   how the NP factor enters
+        "Calculation_settings.form_np_prescription",
+        #   how transition_points are INTERPRETED, without which the values in
+        #   CORR_ANCHOR_KEYS are meaningless (transition_type is its alias)
+        "Calculation_settings.profile_functional_form",
+        "Calculation_settings.transition_type",
+        #   the b* prescription. b0_over_bmax_global = 0 makes b* the identity,
+        #   so a change here silently redefines every lambda.
+        "Calculation_settings.b0_over_bmax",
+        "Calculation_settings.b0_over_bmax_global",
+        "Calculation_settings.lambda",
+        #   the scale choices the profile is built on
+        "Calculation_settings.muf_follows_mub",
+        "Calculation_settings.compensate_fo",
+        "Calculation_settings.disable_asymmetry",
+        "Calculation_settings.recoil_scheme",
+        "Calculation_settings.scale_setting",
+        "Calculation_settings.alphas_solution",
+        "Calculation_settings.rge_solution",
+        #   the base the resumScaleMuR / resumScaleMuF maps multiply. Not in the
+        #   original list: added because they ARE the central value of two
+        #   registry parameters (see STRUCTURAL_CENTRAL), so a difference here
+        #   moves an anchor without moving any number this check would see.
+        "Calculation_settings.kappafo",
+        "Calculation_settings.kappaf",
+        "Calculation_settings.mufo_fixed",
+        #   the profile floors, which set where the resummation is cut off
+        "Calculation_settings.mu0_min",
+        "Calculation_settings.mub_min",
+        "Calculation_settings.mus_min",
+        "Calculation_settings.nus_min",
+        "Calculation_settings.muf_min",
+        "Calculation_settings.muf_max",
+        # The EW input and the process.
+        "Electroweak.alphaem",
+        "Electroweak.sin2_thw",
+        "Electroweak.mz",
+        "Electroweak.gammaz",
+        "Electroweak.mw",
+        "Electroweak.gammaw",
+        "Electroweak.ckm",
+        "Process.boson",
+    }
+)
+
+# WARN: parameter VALUES. The AD tape is exact away from the build point, so the
+# fit can move a lambda or a TNP back; a mismatch is a bookkeeping error, not a
+# broken calculation. ``alphas_mu0`` is the asymmetric case -- it is served by a
+# PDF member pair and INTERPOLATED, so warning there is a deliberate acceptance
+# of interpolation error rather than a free pass. Every shared numeric key of
+# Nonperturbative is covered by rule (see :func:`compare_corr_config`) so a new
+# lambda cannot go unnoticed, and the TNP values are split out of their tuples.
+CORR_WARN_KEYS = frozenset(
+    {
+        "QCD.alphas_mu0",
+        "Calculation_settings.transition_points",
+    }
+)
+
+# NOT COMPARED AT ALL. Not an allowlist -- these are simply outside the check,
+# and nothing outside the two tables above is reported at all. An allowlist has
+# to be maintained against a config that keeps growing, and a report nobody acts
+# on trains people to ignore the output.
+#   calculation_piece   differs BY CONSTRUCTION (the reference runs resummed-only
+#                       and takes the nonsingular from DYTurbo; the cache
+#                       computes the matched total in one go)
+#   Grid_*              the fit's range versus the production grid. qT is in fact
+#                       an exact 71-edge match after the corrgrid work; Q and Y
+#                       are deliberately narrower.
+#   Integration         quadrature accuracy (1e-3 vs 1e-4), a precision choice,
+#                       consistent with the 0.0089% agreement already measured.
+#   Singlet_scheme, and every key on neither table.
+#
+# TWO ASYMMETRIES, stated so we are not fooling ourselves, both MEASURED on the
+# current pair (2026-09-10):
+#
+# 1. CORRECTION-ONLY keys are reported, not failed. The correction's runcard is
+#    SCETlib's RESOLVED config (defaults included) while a bare cache runcard
+#    holds only what was written. Against the bare file that leaves 33 keys with
+#    no counterpart -- exactly the ones a build-default difference would hide
+#    (lambda6, lambda6_nu, lambda4_i, np_model_tmd, the 11 per-flavour
+#    lambda2_*, kappafo). The model therefore compares against ``core.conf``,
+#    the runcard LAYERED ON defaults.conf, which is what the calculation is
+#    configured from; against that, the count is 0.
+#    :func:`compare_corr_config` returns whatever remains, so the model can say
+#    what it did not check.
+#
+# 2. CACHE-ONLY keys are never visited AT ALL, because the loop iterates the
+#    correction's keys -- a key the correction lacks has no value to disagree
+#    with. That could in principle hide a real difference, so it was measured:
+#    there are 12, and every one is fixed-order / matching machinery
+#    (Calculation_settings.fo_order2_* and matched_nons_qt_cut). That is not an
+#    accidental gap. calculation_piece is `matched` for the cache against `sing`
+#    for the correction BY CONSTRUCTION -- the correction runs resummed-only and
+#    takes its nonsingular from DYTurbo, the cache computes the matched total in
+#    one go -- so those 12 knobs exist precisely because of that difference, and
+#    they sit inside the fixed-order exclusion stated just below.
+#    (fo_order2_analytic is `yes` in the cache runcard, `no` in today's
+#    defaults.conf, and absent entirely from the correction's resolved config:
+#    the build that made the correction predates the knob.)
+#
+# Also not covered: the fixed-order half of a scetlib_dyturbo correction. Only
+# the resummed file's runcard is recorded, and the DYTurbo side carries no
+# config, so "the correction is the authority" holds for the resummed sector.
+
+
+def same_setting(a, b):
+    """Are two runcard settings the same value?
+
+    Type-tolerant on purpose: both sides carry every value as a STRING, but one
+    may write ``0.118`` where the other writes ``0.1180``, and case differs on
+    the enum-like settings. So compare numerically when both parse as numbers
+    and case-insensitively otherwise. Coercing to float unconditionally would
+    fail outright on ``tanh_2``; comparing raw strings would report ``0.``
+    against ``0.0`` as a mismatch.
+    """
+    if a is None or b is None:
+        return a == b
+    try:
+        return abs(float(str(a).strip()) - float(str(b).strip())) < 1e-9
+    except ValueError:
+        return str(a).strip().lower() == str(b).strip().lower()
+
+
+def split_tnp(raw):
+    """``(value, mode)`` from a TNP setting, or ``(None, None)`` if unreadable.
+
+    SCETlib stores a TNP as ``(0., 'level0')``, and the two halves belong to
+    DIFFERENT classes: the value is the anchor (WARN, the AD is exact so the fit
+    can move it) while the mode is structural (REFUSE, since the same number
+    means a different variation under a different mode). A whole-string compare
+    would lump them together and ``float()`` on the whole string would just fail.
+    """
+    try:
+        val, mode = ast.literal_eval(str(raw).strip())
+    except (ValueError, SyntaxError, TypeError):
+        return None, None
+    try:
+        return float(val), str(mode)
+    except (TypeError, ValueError):
+        return None, None
+
+
+def _is_numeric(value):
+    try:
+        float(str(value).strip())
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def corr_anchor_key(rabbit):
+    """``(section, key, index)`` the correction records this parameter under.
+
+    ``None`` for a parameter the correction cannot supply -- see
+    :func:`structural_central` for the ones whose central value is fixed by how
+    SCETlib registers them.
+    """
+    if rabbit in CORR_ANCHOR_KEYS:
+        return CORR_ANCHOR_KEYS[rabbit]
+    if rabbit.startswith(TNP_PREFIX_OUT):
+        # The runcard lowercases its keys (b_qqV -> b_qqv), and element 0 of the
+        # (value, mode) tuple is the anchor.
+        return ("TNPs", rabbit[len(TNP_PREFIX_OUT) :].lower(), 0)
+    return None
+
+
+def structural_central(rabbit):
+    """Central value fixed by SCETlib's registration, or ``None``."""
+    if rabbit in STRUCTURAL_CENTRAL:
+        return STRUCTURAL_CENTRAL[rabbit]
+    if rabbit.startswith(PDF_PREFIX_OUT):
+        return 0.0
+    return None
+
+
+def uncovered_params(rabbit_names):
+    """Registry names for which we can state no central value at all.
+
+    Empty for every cache we have built. Not an assertion for its own sake: the
+    correction-key -> registry map is hand-maintained, so a SCETlib rename would
+    otherwise drop a parameter quietly into "keep the cache value", which is the
+    exact failure this machinery exists to remove.
+    """
+    return tuple(
+        n
+        for n in rabbit_names
+        if corr_anchor_key(n) is None and structural_central(n) is None
+    )
+
+
+def corr_anchor_value(config, rabbit):
+    """The correction's central value for *rabbit*, or ``None`` if unrecorded.
+
+    Raises on a setting that is present but unreadable -- that is a bug in the
+    recorded config, not a missing anchor, and the two want opposite handling.
+    """
+    where = corr_anchor_key(rabbit)
+    if where is None:
+        return None
+    section, key, index = where
+    body = config.get(section)
+    if not isinstance(body, dict) or key not in body:
+        return None
+    raw = body[key]
+    if section == "TNPs":
+        val, _ = split_tnp(raw)
+        if val is None:
+            raise ValueError(
+                f"{section}.{key} = {raw!r} is not a SCETlib TNP "
+                f"(value, mode) tuple, so {rabbit}'s anchor cannot be read."
+            )
+        return val
+    if index is None:
+        try:
+            return float(str(raw).strip())
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"{section}.{key} = {raw!r} is not numeric, so {rabbit}'s "
+                f"anchor cannot be read."
+            )
+    try:
+        seq = ast.literal_eval(str(raw).strip())
+        return float(seq[index])
+    except (ValueError, SyntaxError, TypeError, IndexError, KeyError):
+        raise ValueError(
+            f"{section}.{key} = {raw!r} is not a list with at least "
+            f"{index + 1} entries, so {rabbit}'s anchor cannot be read."
+        )
+
+
+def compare_corr_config(corr_cfg, cache_cfg):
+    """Compare a recorded correction runcard against the cache's own.
+
+    Returns ``(refuse, warn, corr_only)``. The first two are
+    ``[(name, corr_value, cache_value)]`` for the declared keys that disagree;
+    ``corr_only`` names the keys the correction carries and the cache does not,
+    which are SCETlib defaults the comparison cannot see through and so are
+    reported as "not checked", never as failures.
+
+    Section names are compared as spelled (both sides use SCETlib's own INI
+    spelling); keys are lowercased on both sides, since the cache runcard is
+    mixed-case INI and the recorded correction config is not.
+    """
+    refuse, warn, corr_only = [], [], []
+    for section, corr_body in sorted(corr_cfg.items()):
+        if not isinstance(corr_body, dict):
+            continue
+        cache_body = cache_cfg.get(section)
+        cache_body = (
+            {str(k).lower(): v for k, v in cache_body.items()}
+            if isinstance(cache_body, dict)
+            else {}
+        )
+        for key, corr_val in sorted(corr_body.items()):
+            key = str(key).lower()
+            name = f"{section}.{key}"
+            if key not in cache_body:
+                corr_only.append(name)
+                continue
+            cache_val = cache_body[key]
+            if section == "TNPs":
+                cv, cm = split_tnp(corr_val)
+                hv, hm = split_tnp(cache_val)
+                if cv is None or hv is None:
+                    refuse.append((f"{name} [unreadable]", corr_val, cache_val))
+                    continue
+                if not same_setting(cv, hv):
+                    warn.append((f"{name} value", cv, hv))
+                if not same_setting(cm, hm):
+                    refuse.append((f"{name} mode", cm, hm))
+            elif name in CORR_REFUSE_KEYS:
+                if not same_setting(corr_val, cache_val):
+                    refuse.append((name, corr_val, cache_val))
+            elif name in CORR_WARN_KEYS or (
+                section == "Nonperturbative" and _is_numeric(corr_val)
+            ):
+                if not same_setting(corr_val, cache_val):
+                    warn.append((name, corr_val, cache_val))
+    return refuse, warn, corr_only

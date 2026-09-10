@@ -167,42 +167,58 @@ def R_info_from_auxiliary(indata, group=DEFAULT_RESPONSE_GROUP):
     )
 
 
-# --- the card's recorded NP anchor -------------------------------------------
+# --- the card's recorded theory correction -----------------------------------
 #
-# Histmaker outputs record the nonperturbative values their theory correction was
-# generated at, and that key is propagated into the datacard. It is worth
-# cross-checking against the cache anchor: a mismatch leaves the ratio equal to 1
-# at the start, so nothing looks wrong, while the response is being evaluated at
-# the wrong point.
-# Likewise a datacard/histmaker convention, not ours.
+# A histmaker output records what its theory correction was generated at, and
+# rabbit propagates that into the datacard. This is the read side. It is not a
+# nicety: the model's prediction is a RATIO to the anchor, multiplying templates
+# the correction already reweighted, so without these entries the fit does not
+# know what its own denominator means -- and the ratio is 1 at the start either
+# way, so a wrong anchor cannot be seen downstream.
+#
+# Two keys, both histmaker/datacard conventions rather than ours:
+#   NP_ANCHOR_META_KEY   the older curated NP extract, still written.
+#   CORR_CONFIG_META_KEY the whole resummed runcard, which is what the anchor is
+#                        actually built from (see params.CORR_ANCHOR_KEYS).
 NP_ANCHOR_META_KEY = "scetlib_np_lambda_central"
+CORR_CONFIG_META_KEY = "scetlib_corr_config"
 
 
-def np_anchor_from_meta(meta, proc="Z", max_depth=8):
-    """The card's recorded NP anchor as a flat ``{name: value}`` dict, or None.
+def meta_entry(meta, key, proc="Z", max_depth=8):
+    """The per-proc value stored under *key*, or ``None``.
 
     rabbit nests the histmaker's ``meta_info`` under ``meta_info_input``, and
-    again in a fitresult, so walk that chain. Returns None when the key is absent
-    rather than raising -- the check is a guard, not a requirement.
+    again in a fitresult, so walk that chain. A single-proc entry is returned
+    whatever it is keyed by -- a Z-only histmaker has no reason to spell it
+    "Z" -- but with several procs the name must match.
     """
     cur = meta
     for _ in range(max_depth):
         if not isinstance(cur, dict):
             return None
-        entry = cur.get(NP_ANCHOR_META_KEY)
+        entry = cur.get(key)
         if isinstance(entry, dict) and entry:
             per_proc = entry.get(proc)
             if per_proc is None and len(entry) == 1:
                 per_proc = next(iter(entry.values()))
-            if isinstance(per_proc, dict):
-                out = {}
-                for sub in ("eff_params", "gnu_params"):
-                    for k, v in dict(per_proc.get(sub, {})).items():
-                        if isinstance(v, (int, float)):
-                            out[k] = float(v)
-                return out or None
+            if per_proc is not None:
+                return per_proc
         nxt = cur.get("meta_info_input")
         if not isinstance(nxt, dict) or nxt is cur:
             return None
         cur = nxt
     return None
+
+
+def corr_config_from_meta(meta, proc="Z", max_depth=8):
+    """The recorded correction runcard as ``{tag, basename, config, ...}``.
+
+    ``None`` when the card records none, which the model treats as a refusal
+    rather than a warning: the central values are then unknown, and taking them
+    from the cache instead is exactly the silent-wrong-answer trap this exists
+    to close.
+    """
+    entry = meta_entry(meta, CORR_CONFIG_META_KEY, proc=proc, max_depth=max_depth)
+    if not isinstance(entry, dict) or not isinstance(entry.get("config"), dict):
+        return None
+    return entry

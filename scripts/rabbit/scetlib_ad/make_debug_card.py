@@ -36,6 +36,7 @@ sys.path.insert(
 from rabbit import tensorwriter  # noqa: E402
 from wremnants.postprocessing.scetlib_ad import params as adp  # noqa: E402
 from wremnants.postprocessing.scetlib_ad.response import (  # noqa: E402
+    CORR_CONFIG_META_KEY,
     NP_ANCHOR_META_KEY,
 )
 from wremnants.postprocessing.scetlib_ad.xsec_backend import (  # noqa: E402
@@ -160,9 +161,16 @@ def main():
     writer.add_data(as_hist(data, weighted=False), CHANNEL)
     writer.add_process(as_hist(nominal, weighted=True), PROC, CHANNEL, signal=True)
 
-    # The anchor, in the shape the model cross-checks against
-    # Writing it means the debug card exercises the
-    # anchor guard rather than skipping it.
+    # The anchor metadata a real card carries, so the debug card exercises the
+    # model's anchor path rather than skipping it.
+    #
+    # On a real card these entries describe the theory CORRECTION its templates
+    # were reweighted with, which is a different SCETlib artefact than the cache.
+    # Here there is no correction at all -- the template IS sigma_gen at the
+    # cache anchor -- so the cache's own runcard is, self-consistently, the
+    # correction: same calculation, same central values, by construction. That
+    # is exactly what makes this a closure test of the model and not of two
+    # predictions agreeing.
     eff, gnu = {}, {}
     for sname, value in zip(core.param_names, core.anchor):
         try:
@@ -176,7 +184,20 @@ def main():
     conf_np = _np_models_from_conf(core.conf)
     eff["np_model"] = conf_np[0]
     gnu["np_model_nu"] = conf_np[1]
-    meta = {NP_ANCHOR_META_KEY: {"Z": {"eff_params": eff, "gnu_params": gnu}}}
+    meta = {
+        NP_ANCHOR_META_KEY: {"Z": {"eff_params": eff, "gnu_params": gnu}},
+        CORR_CONFIG_META_KEY: {
+            "Z": {
+                "tag": "debug_card_from_cache",
+                "basename": os.path.basename(args.conf),
+                "config": {
+                    section: {k.lower(): str(v) for k, v in core.conf[section].items()}
+                    for section in core.conf.sections()
+                },
+                "applied_to_nominal": True,
+            }
+        },
+    }
 
     os.makedirs(args.outdir, exist_ok=True)
     writer.write(
