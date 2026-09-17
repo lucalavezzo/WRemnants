@@ -1,31 +1,56 @@
 #!/usr/bin/env python3
-"""Build a SCETlib autodiff cache for the gen binning of a specific rabbit card.
+"""Build a SCETlib autodiff cache on an EXPLICIT gen grid.
 
-The cache is only valid for the bins it was built for, so the binning should
-come from the card rather than being kept in sync by hand. This reads the gen
-axes out of a datacard -- the fit channel's own axes for a gen-level sigmaUL
-card, or the response auxiliary's gen axes for a reco card -- writes the
-matching SCETlib runcard next to the output, and runs the expensive build:
+The cache is only valid for the bins it was built for, so the grid is given
+here, as options, and defaults to the grid the shipped theory corrections are
+defined on. This writes the matching SCETlib runcard next to the output and runs
+the expensive build:
 
     compressed bin rules (resummed)  +  frozen fixed-order grid (nonsingular)
+
+WHICH GRID, AND WHY IT IS NOT A DATACARD'S. A cache feeding the fit-time model
+must compute sigma_gen on the bins the RESPONSE folds, so taking the grid from a
+datacard was right while that was the only consumer. A cache feeding a THEORY
+CORRECTION must cover the phase space the correction is applied to, which is
+every gen event BEFORE acceptance -- and the card's gen grid is truncated at the
+reco |y_ll| limit (``mz_dilepton.py``: ``[e for e in corr_edges["absY"] if e <=
+y_max]``). Building a correction from a card-derived cache therefore left
+|Y| > 2.5 -- 29.6 % of the Z gen cross section -- on the correction's flow bin,
+which ``set_corr_ratio_flow`` fixes at exactly 1, i.e. uncorrected. Reading the
+grid off a card also made the dependency circular once the correction came from
+the cache: corr -> response binning -> card -> cache -> corr.
+
+So there is no ``--card``. Pass ``--y-edges`` / ``--qt-edges`` / ``--q-edges``,
+whose defaults ARE the shipped corrections' grid; a narrower grid is then a
+visible choice rather than an inherited one.
 
 WHAT IS HERE AND WHAT IS NOT. The build itself is nothing but SCETlib calls, so
 it lives in SCETlib, in ``examples/matched_ad/prepare_cache.py``: the variation
 plan, the node set, the rules, the member loop, the cache file. Node sets, bin
 rules, member variations and the on-disk format are all theirs, and keeping our
 copy of them meant learning about a layout change by getting wrong answers.
-What is ours, and what this file is, is the rabbit side: reading the gen axes
-off a card, writing the runcard from them, cutting the card's bins to a
-``--subset``, and driving the upstream steps in the order they have to happen.
+What is ours, and what this file is, is the wrapper: holding the grid, writing
+the runcard from it, cutting the bins to a ``--subset``, and driving the upstream
+steps in the order they have to happen.
+
+PARALLELISM IS THREADS, NOT PROCESSES. The expensive stage is the PDF-member
+loop, whose cost is ``set_pdf_keep_nodes``, and that is parallel over NODES of
+all bins at once -- so ``--threads`` is the lever and it scales past the bin
+count. The 770-bin production cache was built in ONE process at ``--threads
+384`` (25.3 h). ``--subset`` remains, but for CRASH GRANULARITY and for building
+a cheap test cache, not for speed: there is no checkpointing, so a build that
+dies is lost, and subsets can be merged afterwards with SCETlib's
+``scetlib_cache.merge_bin_caches``.
 
 Cost scales with the number of gen bins. Measured on this SCETlib build:
 ~0.34 s/bin of rule building and ~2 s/bin of fixed-order warming, and ~0.84 MB
-of cache per bin. A 200-bin gen-level card is therefore minutes and ~170 MB; the
-5740-bin correction grid is hours and several GB.
+of cache per bin -- but those are averages over a whole grid, and the LOW-qT
+rows cost many times the rest, so never extrapolate a cost from a high-qT
+subset.
 
     source <scetlib-cms>/setup.sh
-    python scripts/rabbit/scetlib_ad/prepare_cache_for_card.py \
-        --card <card>.hdf5 --base-conf <scetlib-cms>/examples/matched_ad/matched.conf \
+    python scripts/rabbit/scetlib_ad/build_scetlib_ad_cache.py \
+        --base-conf <scetlib-cms>/examples/matched_ad/matched.conf \
         -o /path/to/cachedir
 """
 
@@ -35,7 +60,6 @@ import os
 import sys
 import time
 
-import h5py
 import numpy as np
 
 sys.path.insert(
@@ -43,10 +67,6 @@ sys.path.insert(
     os.path.dirname(
         os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     ),
-)
-
-from wremnants.postprocessing.scetlib_ad.response import (  # noqa: E402
-    DEFAULT_RESPONSE_GROUP,
 )
 
 # F401 on `configure`: it is used, but through _resolve_steps below rather than
@@ -146,48 +166,110 @@ def _resolve_steps():
     )
 
 
-def gen_axes_from_card(path, gen_level):
-    """[(qT name, edges), (|Y| name, edges)] for the card's gen grid."""
-    from wums.ioutils import pickle_load_h5py
-
-    with h5py.File(path, "r") as f:
-        if gen_level:
-            meta = pickle_load_h5py(f["meta"])
-            channels = {
-                n: i
-                for n, i in meta["channel_info"].items()
-                if not i.get("masked", False)
-            }
-            if len(channels) != 1:
-                raise SystemExit(
-                    f"expected a single non-masked channel, got {list(channels)}"
-                )
-            info = next(iter(channels.values()))
-            axes = [
-                (ax.name, np.asarray(ax.edges, dtype=np.float64)) for ax in info["axes"]
-            ]
-            if len(axes) != 2:
-                raise SystemExit(
-                    f"expected 2 gen axes (qT, |Y|), got {[n for n, _ in axes]}"
-                )
-            return axes
-        from rabbit.auxiliary import read_auxiliary_from_h5
-
-        aux = read_auxiliary_from_h5(f.get("auxiliary")) or {}
-        if DEFAULT_RESPONSE_GROUP not in aux:
-            raise SystemExit(
-                f"the card has no {DEFAULT_RESPONSE_GROUP!r} auxiliary, so its "
-                "gen binning is "
-                "unknown. Rebuild it with setupRabbit --storeResponseMatrix, or "
-                "pass --gen-level for a gen-level sigmaUL card."
-            )
-        b = aux[DEFAULT_RESPONSE_GROUP]
-        names = [n.decode() if isinstance(n, bytes) else str(n) for n in b["gen_axes"]]
-        return [(n, np.asarray(b[f"edges__{n}"], dtype=np.float64)) for n in names]
+# The grid the shipped theory corrections are defined on, and therefore the
+# default here: a cache feeding a correction has to cover the phase space the
+# correction is applied to. Q is one bin, the Z window. The |Y| edges are the
+# shipped corrections' 17 bins -- the first 12 of which are what a card-derived
+# cache used to stop at. qT is the 70-bin grid, which the shipped corrections
+# and the SCETlib production runcard already share byte for byte.
+DEFAULT_Q_EDGES = [60.0, 120.0]
+DEFAULT_Y_EDGES = [
+    0,
+    0.15,
+    0.3,
+    0.5,
+    0.7,
+    0.9,
+    1.1,
+    1.3,
+    1.5,
+    1.8,
+    2,
+    2.5,
+    2.75,
+    3,
+    3.25,
+    3.5,
+    4,
+    5,
+]
+DEFAULT_QT_EDGES = [
+    0,
+    0.5,
+    1,
+    1.5,
+    2,
+    2.5,
+    3,
+    3.5,
+    4,
+    4.5,
+    5,
+    5.5,
+    6,
+    6.5,
+    7,
+    7.5,
+    8,
+    8.5,
+    9,
+    9.5,
+    10,
+    10.5,
+    11,
+    11.5,
+    12,
+    12.5,
+    13,
+    13.5,
+    14,
+    14.5,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26,
+    27,
+    28,
+    29,
+    30,
+    31,
+    32,
+    33,
+    34,
+    35,
+    36,
+    37,
+    38,
+    39,
+    40,
+    42,
+    44,
+    46,
+    48,
+    50,
+    52,
+    54,
+    56,
+    58,
+    60,
+    65,
+    70,
+    80,
+    90,
+    100,
+]
 
 
 def write_runcard(base_conf, out_path, gen_axes, Q_lo, Q_hi):
-    """Base runcard + the card's grids, written where the cache can find it."""
+    """Base runcard + this build's grids, written where the cache can find it."""
     conf = configparser.ConfigParser(inline_comment_prefixes="#")
     conf.optionxform = str  # SCETlib option names are case-sensitive
     if not conf.read(base_conf):
@@ -204,11 +286,12 @@ def write_runcard(base_conf, out_path, gen_axes, Q_lo, Q_hi):
         conf[sec]["bins"] = "true"
         conf[sec]["values"] = "[" + ", ".join(f"{v:g}" for v in values) + "]"
     header = (
-        "# Generated by scripts/rabbit/scetlib_ad/prepare_cache_for_card.py.\n"
+        "# Generated by scripts/rabbit/scetlib_ad/build_scetlib_ad_cache.py.\n"
         f"# Base runcard: {os.path.abspath(base_conf)}\n"
-        "# The Grid_* sections are the card's gen binning; everything else is\n"
-        "# inherited. Keep this file next to the cache -- the fit needs it to\n"
-        "# rebuild the identical calculation the rules attach to.\n"
+        "# The Grid_* sections are the gen binning this cache was built on;\n"
+        "# everything else is inherited. Keep this file next to the cache --\n"
+        "# the fit needs it to rebuild the identical calculation the rules\n"
+        "# attach to.\n"
     )
     with open(out_path, "w") as f:
         f.write(header)
@@ -245,14 +328,34 @@ def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    ap.add_argument("--card", default=None, help="rabbit datacard hdf5")
     ap.add_argument(
-        "--grid-json",
-        default=None,
-        help="explicit gen grid instead of a card, as JSON: "
-        '\'{"Q": [60, 120], "Y": [...], "qT": [...]}\'. The Y edges may be '
-        "signed (no |Y| folding assumed) -- useful for validating against a "
+        "--y-edges",
+        type=float,
+        nargs="+",
+        default=DEFAULT_Y_EDGES,
+        help="rapidity bin edges. The DEFAULT is the shipped theory "
+        "corrections' |Y| grid, which is what a cache feeding a correction "
+        "needs; a narrower grid leaves the phase space above it UNCORRECTED "
+        "(the correction's flow bin is exactly 1). May be signed, in which "
+        "case no |Y| folding is assumed -- useful for validating against a "
         "SCETlib reference run on its own signed grid, and required for W.",
+    )
+    ap.add_argument(
+        "--qt-edges",
+        type=float,
+        nargs="+",
+        default=DEFAULT_QT_EDGES,
+        help="qT bin edges (default: the shipped corrections' 70-bin grid, "
+        "which the SCETlib production runcard also used).",
+    )
+    ap.add_argument(
+        "--q-edges",
+        type=float,
+        nargs=2,
+        default=DEFAULT_Q_EDGES,
+        help="the single Q bin, as two edges (default: the Z window the "
+        "corrections use). Gen events outside it land in the correction's Q "
+        "flow bin and are uncorrected.",
     )
     ap.add_argument(
         "--base-conf",
@@ -262,14 +365,6 @@ def main():
     )
     ap.add_argument("-o", "--outdir", required=True)
     ap.add_argument("--outname", default="cache")
-    ap.add_argument(
-        "-g",
-        "--gen-level",
-        action="store_true",
-        help="take the gen binning from the fit channel's own axes "
-        "(a gen-level sigmaUL card) instead of the response "
-        "auxiliary",
-    )
     ap.add_argument(
         "--subset",
         default=None,
@@ -284,13 +379,16 @@ def main():
         "The indices must be CONTIGUOUS in both axes: the gen fold requires the "
         "cache to tile a rectangle exactly, so scattered picks are refused "
         "downstream with 'gen bin(s) are not exactly tiled by the cache'. Choose "
-        "by COST, not by count -- the parallel axis is the bins, so wall time is "
-        "roughly the slowest bin, and the lowest ptV bin is far more expensive "
-        "than all the others together.\n"
-        "Do NOT use a subset cache for a fit.",
+        "by COST, not by count: the lowest ptV rows are far more expensive than "
+        "all the others together, so never extrapolate a cost from a high-qT "
+        "subset.\n"
+        "This is for a TEST cache, or for CRASH GRANULARITY on a long build "
+        "(there is no checkpointing) -- not for speed, since the member stage "
+        "is parallel over NODES and scales past the bin count. Disjoint subsets "
+        "can be assembled afterwards with SCETlib's "
+        "scetlib_cache.merge_bin_caches. A subset cache on its own is not for "
+        "a fit.",
     )
-    ap.add_argument("--Q-lo", type=float, default=60.0)
-    ap.add_argument("--Q-hi", type=float, default=120.0)
     ap.add_argument("--threads", type=int, default=0)
     ap.add_argument(
         "--n-train",
@@ -328,19 +426,6 @@ def main():
         "alphaS is then a fixed-PDF derivative -- do not quote it.",
     )
     ap.add_argument(
-        "--members",
-        default=None,
-        help="build only the member range 'LO:HI' (half-open, into the "
-        "canonical variation-member list [eig pairs..., alphaS pair, muF "
-        "pair]) and write a PARTIAL cache plus a .shard.json sidecar. The "
-        "point is to split the one stage whose axis is serial -- the member "
-        "loop -- across PROCESSES, since members share global AD state behind "
-        "a mutex and cannot be threaded. Use "
-        "scripts/rabbit/scetlib_ad/build_cache_parallel.py, which picks the "
-        "ranges, runs the workers and merges them; a partial cache on its own "
-        "is NOT usable.",
-    )
-    ap.add_argument(
         "--fork-members",
         type=int,
         default=1,
@@ -352,10 +437,9 @@ def main():
         "set and cannot be merged at all), but a forked child loses the TBB "
         "worker pool -- measured 99% CPU per child against the parent's 1900% "
         "-- so each child is single-threaded and a real bin count is ~100x "
-        "slower per member. To parallelise a real build, split BINS across "
-        "processes instead (--subset, then build_cache_parallel.py "
-        "--merge-bins) or simply raise --threads: the member stage is parallel "
-        "over NODES, not bins, and scales past the bin count. This exists for "
+        "slower per member. To parallelise a real build, raise --threads: the "
+        "member stage is parallel over NODES, not bins, and scales past the "
+        "bin count. This exists for "
         "--fork-selftest, which is what proves the member merge exact.",
     )
     ap.add_argument(
@@ -381,24 +465,33 @@ def main():
     )
     args = ap.parse_args()
 
-    if (args.card is None) == (args.grid_json is None):
-        raise SystemExit("give exactly one of --card and --grid-json")
-    if args.grid_json:
-        import json
-
-        g = json.loads(args.grid_json)
-        args.Q_lo, args.Q_hi = float(g["Q"][0]), float(g["Q"][-1])
-        gen_axes = [
-            ("qT", np.asarray(g["qT"], dtype=np.float64)),
-            ("Y", np.asarray(g["Y"], dtype=np.float64)),
-        ]
-    else:
-        gen_axes = gen_axes_from_card(args.card, args.gen_level)
+    for name, edges in (("--y-edges", args.y_edges), ("--qt-edges", args.qt_edges)):
+        e = np.asarray(edges, dtype=np.float64)
+        if e.size < 2 or np.any(np.diff(e) <= 0):
+            raise SystemExit(f"{name} must be >= 2 strictly increasing edges")
+    args.Q_lo, args.Q_hi = (float(v) for v in args.q_edges)
+    if args.Q_hi <= args.Q_lo:
+        raise SystemExit("--q-edges must be increasing")
+    gen_axes = [
+        ("qT", np.asarray(args.qt_edges, dtype=np.float64)),
+        ("Y", np.asarray(args.y_edges, dtype=np.float64)),
+    ]
     n_bins = int(np.prod([len(e) - 1 for _, e in gen_axes]))
     os.makedirs(args.outdir, exist_ok=True)
     runcard = os.path.join(args.outdir, args.outname + ".conf")
     write_runcard(args.base_conf, runcard, gen_axes, args.Q_lo, args.Q_hi)
-    print(f"gen binning from {args.card or 'explicit --grid-json'}:")
+    default_grid = list(args.y_edges) == list(DEFAULT_Y_EDGES) and list(
+        args.qt_edges
+    ) == list(DEFAULT_QT_EDGES)
+    print(
+        "gen binning: "
+        + (
+            "the shipped theory corrections' grid (defaults)"
+            if default_grid
+            else "EXPLICIT, not the shipped corrections' default grid"
+        )
+        + ":"
+    )
     for name, edges in gen_axes:
         print(f"   {name:<12} {len(edges) - 1:4d} bins  [{edges[0]:g}, {edges[-1]:g}]")
     print(f"   Q            1 bin    [{args.Q_lo:g}, {args.Q_hi:g}]")
@@ -407,9 +500,12 @@ def main():
     # cache does not reach that: with 30 bins the same build ran ~10x slower per
     # bin, because there is not enough work to fill the pool.
     print(
-        f"   projected (at full parallelism): ~{n_bins * 0.34 / 60:.0f} min of "
-        f"rules, ~{n_bins * 2.0 / 60:.0f} min of fixed-order warming, "
-        f"~{n_bins * 0.84:.0f} MB of cache"
+        f"   projected for the FULL {n_bins}-bin grid (at full parallelism, and "
+        f"BEFORE any --subset): ~{n_bins * 0.34 / 60:.0f} min of rules, "
+        f"~{n_bins * 2.0 / 60:.0f} min of fixed-order warming, "
+        f"~{n_bins * 0.84:.0f} MB of cache. These are averages over a whole "
+        f"grid: the low-qT rows cost many times the rest, so this is not a "
+        f"per-shard estimate and a subset's share is NOT proportional."
     )
     if args.dry_run:
         return
@@ -434,17 +530,6 @@ def main():
     # a shorter vector than the members are interpolated in, which is the
     # "call set_pdf_eig_params before building" error the extension raises.
     plan = None if args.no_pdf else me.plan_variations(p0, names, conf, args)
-    mlo, mhi = 0, None
-    if args.members and args.fork_members > 1:
-        raise SystemExit(
-            "--members builds ONE shard and --fork-members splits the members "
-            "over children; use one or the other"
-        )
-    if args.members:
-        if plan is None:
-            raise SystemExit("--members needs variation members; not with --no-pdf")
-        mlo, mhi = (int(x) for x in args.members.split(":"))
-        mhi = me.check_member_range(plan, mlo, mhi)
     if plan and plan["n_eig"]:
         # BOTH pieces: each kernel interpolates its own members from the
         # coefficients, so they are ordinary parameters on both sides and the
@@ -494,24 +579,8 @@ def main():
             )
             me.write_cache(sing, nons, bins, plan, out + ".serial")
     else:
-        me.build_variations(sing, nons, bins, p0, plan, args, mlo, mhi)
-        path = me.write_cache(
-            sing,
-            nons,
-            bins,
-            plan,
-            out,
-            *((mlo, mhi) if args.members else (None, None)),
-            args=args,
-        )
-        if args.members:
-            print(
-                "Merge the shards with\n"
-                "   python scripts/rabbit/scetlib_ad/build_cache_parallel.py "
-                "--merge-only -o <outdir>",
-                flush=True,
-            )
-            return
+        me.build_variations(sing, nons, bins, p0, plan, args, 0, None)
+        path = me.write_cache(sing, nons, bins, plan, out, None, None, args=args)
     print(
         "\nNow check it:\n"
         f"   python scripts/rabbit/scetlib_ad/backend_check.py "
