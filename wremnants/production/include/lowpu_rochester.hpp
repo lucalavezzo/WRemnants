@@ -606,8 +606,16 @@ RoccoR *rochester = new RoccoR(
                                                                 // for lowPU
 
 Vec_f applyRochesterMC(Vec_f pt, Vec_f eta, Vec_f phi, Vec_f ch, Vec_i gen_idx,
-                       Vec_f gen_pt, Vec_i nTrackerLayers,
+                       Vec_f gen_pt, Vec_i nTrackerLayers, unsigned long long seed,
                        int fluctuation = 0) {
+
+  // Thread-safe RNG: one thread_local generator, re-seeded for every event.
+  // This makes the smearing deterministic per event and independent of the
+  // number of threads / event-to-thread assignment (fix for issue #576).
+  // NB: seed is incremented by one because TRandom3::SetSeed(0) would draw a
+  // non-deterministic seed from TUUID.
+  static thread_local TRandom3 rng;
+  rng.SetSeed(seed + 1);
 
   unsigned int size = pt.size();
   Vec_f res(size, 0.0);
@@ -622,8 +630,8 @@ Vec_f applyRochesterMC(Vec_f pt, Vec_f eta, Vec_f phi, Vec_f ch, Vec_i gen_idx,
     else
       res[i] = 1.0000 * pt[i] *
                rochester->kSmearMC(ch[i], pt[i], eta[i], phi[i],
-                                   nTrackerLayers.at(i),
-                                   rochester->random->Rndm(), fluctuation, 0);
+                                   nTrackerLayers.at(i), rng.Rndm(),
+                                   fluctuation, 0);
   }
 
   return res;
