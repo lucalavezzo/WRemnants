@@ -26,10 +26,16 @@ def define_top_pt_weight(df, dataset_name):
     df = df.Define(
         "antiTopQuark", "GenPart_pdgId == -6 && (GenPart_statusFlags & (1 << 13))"
     )
-    df = df.Define("topPt", "GenPart_pt[topQuark][0]")
-    df = df.Define("antiTopPt", "GenPart_pt[antiTopQuark][0]")
+    # guard against events without a last-copy top or antitop, which are left unweighted
+    df = df.Define(
+        "topPt", "ROOT::VecOps::Any(topQuark) ? GenPart_pt[topQuark][0] : -1.f"
+    )
+    df = df.Define(
+        "antiTopPt",
+        "ROOT::VecOps::Any(antiTopQuark) ? GenPart_pt[antiTopQuark][0] : -1.f",
+    )
     df = df.Define(
         "topPtWeight",
-        f"std::sqrt({top_pt_sf.format(pt='topPt')}*{top_pt_sf.format(pt='antiTopPt')})",
+        f"topPt < 0 || antiTopPt < 0 ? 1.0 : std::sqrt({top_pt_sf.format(pt='topPt')}*{top_pt_sf.format(pt='antiTopPt')})",
     )
     return df
