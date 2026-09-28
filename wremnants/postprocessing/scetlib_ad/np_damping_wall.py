@@ -302,7 +302,7 @@ def _binding_absY(indata):
 
     Two places carry the gen binning, and they agree by construction (the
     cache's ``Grid_Y`` IS the card's gen binning -- see the header
-    ``prepare_cache_for_card.py`` writes into cache.conf):
+    ``build_scetlib_ad_cache.py`` writes into cache.conf):
       * the response auxiliary's ``gen_axes`` (reco fits), and
       * the fit channel's own axes (``gen_level=1``, where the channel IS the
         gen binning).

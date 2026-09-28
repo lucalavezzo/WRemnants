@@ -384,7 +384,7 @@ def main():
         action="store_true",
         help="allow a cache that covers only SOME of the card's gen bins, and "
         "compare only the covered ones. For iterating on a subset cache built "
-        "with prepare_cache_for_card --subset: ten bins in a minute instead of "
+        "with build_scetlib_ad_cache --subset: ten bins in a minute instead of "
         "210 in seven hours. The number of excluded bins is always printed -- a "
         "subset must never be able to look like a clean full validation.",
     )

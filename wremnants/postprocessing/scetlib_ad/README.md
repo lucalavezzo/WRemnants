@@ -40,8 +40,7 @@ off a card, the runcard, `--subset`, and the shard scheduling.
 | script | role |
 |---|---|
 | `backend_check.py` | standalone cache sanity: anchor round trip, FD-checked Jacobian, Hessian symmetry, fold sum rule |
-| `prepare_cache_for_card.py` | build a cache for a card's gen binning, or an explicit `--grid-json` |
-| `build_cache_parallel.py` | split the BINS across processes (`--bin-groups`) and merge the shards (`--merge-bins`, `--merge-only`) |
+| `build_scetlib_ad_cache.py` | build a cache on an explicit gen grid, defaulting to the grid the shipped theory corrections use. One process: the member stage is parallel over NODES, so `--threads` is the lever. `--subset` is for a test cache or crash granularity; assemble disjoint subsets with SCETlib's `scetlib_cache.merge_bin_caches` |
 | `make_debug_card.py` | a self-contained gen-level card built from a cache, for closure tests |
 | `compare_to_scetlib_run.py` | validate the resummed piece against a native SCETlib production run |
 | `conf/Z_CT18Z_N3p0LL_FranksVals.conf` | runcard reproducing the current analysis central (see below) |
