@@ -1121,11 +1121,11 @@ class Recoil:
                 # acceptance is in the MET and has to be subtracted from it like the
                 # selected muon, otherwise it is invisible and enters the proxy only.
                 self.df = self.df.Define(
-                    "gen_partner", "lep_corr_charge == 1 ? lepGen : antilepGen"
+                    "gen_partner", "lep_corr_charge > 0 ? lepGen : antilepGen"
                 )
                 self.df = self.df.Define(
                     "gen_partner_pdgId",
-                    "lep_corr_charge == 1 ? GenPart_pdgId[postFSRleps][postFSRlepIdx] : GenPart_pdgId[postFSRantileps][postFSRantilepIdx]",
+                    "lep_corr_charge > 0 ? GenPart_pdgId[postFSRleps][postFSRlepIdx] : GenPart_pdgId[postFSRantileps][postFSRantilepIdx]",
                 )
                 self.df = self.df.Define(
                     "gen_partner_in_met",
