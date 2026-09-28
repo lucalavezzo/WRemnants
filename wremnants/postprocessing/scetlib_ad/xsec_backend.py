@@ -29,6 +29,7 @@ grids under ``share/scetlib/beamfunc/`` must be reachable.
 
 import configparser
 import os
+import time
 
 import numpy as np
 
@@ -167,6 +168,100 @@ def configure(config_path, threads=0, diff_scales=True, fo_resolve_muR=True):
         piece.set_gradient_threads(nthreads)
         piece.set_gradient_node_cache(True)
     return conf, sigma
+
+
+def _raw_rules_path(cache_path):
+    """The flat rule file extracted beside ``cache_path``, if it is still current.
+
+    ``scripts/rabbit/scetlib_ad/extract_cache_rules.py`` writes ``<stem>.rules.bin``
+    plus a ``<stem>.rules.json`` sidecar recording the zip member it came from.
+    Used only while that record matches the cache's CURRENT rules member (CRC32
+    and sizes, read from the zip directory -- no decompression), so replacing
+    ``cache.npz`` can never pair it with stale rules. Anything else, including a
+    stale or unreadable sidecar, returns None and the stock path loads the cache.
+    """
+    import json
+    import zipfile
+
+    stem = cache_path[:-4] if cache_path.endswith(".npz") else cache_path
+    rules, side = stem + ".rules.bin", stem + ".rules.json"
+    if not os.path.exists(side):
+        return None
+    try:
+        with open(side) as f:
+            rec = json.load(f)
+        with zipfile.ZipFile(cache_path) as z:
+            info = z.getinfo(rec["member"])
+        now = (info.CRC, info.file_size, info.compress_size)
+        was = (rec["crc32"], rec["file_size"], rec["compress_size"])
+        if now != was:
+            print(
+                f"[scetlib_ad] WARNING: {side} was extracted from a different "
+                f"{rec['member']} (crc/size {was} vs {now}); ignoring it and "
+                "loading the rules from the cache itself",
+                flush=True,
+            )
+            return None
+        if os.path.getsize(rules) != rec["payload_bytes"]:
+            print(
+                f"[scetlib_ad] WARNING: {rules} is truncated; ignoring it", flush=True
+            )
+            return None
+    except (OSError, KeyError, ValueError) as e:
+        print(f"[scetlib_ad] WARNING: cannot use {side} ({e}); ignoring it", flush=True)
+        return None
+    return rules
+
+
+def _load_with_raw_rules(cls, cache_path, rules_path, sing, nons):
+    """``ScetlibCachedXsecTF.load`` with the rule blob read from a flat file.
+
+    The stock ``load`` holds the ~143 GB rule blob three times (numpy array,
+    ``.tobytes()``, the C++ string): a ~520 GB peak and most of a 16-107 min load.
+    ``DrellYan.load_bin_rules(path)`` reads it with an ifstream instead -- same
+    ``_load_bin_rules`` parser, same fingerprint check -- measured 3-7 min at the
+    ~323 GB steady state (260923-oldmin-loss-gap). Everything else mirrors the
+    stock ``load`` at scetlib-cms 2dd978a line for line; keep it in step.
+    Only the ``sing``/``nons``-supplied branch is needed: the caller always
+    configures the calculation itself.
+    """
+    with np.load(cache_path, allow_pickle=False) as z:
+        d = {k: z[k] for k in z.files if k != "rules"}
+    import scetlib_cache
+
+    fmt = int(d["format"])
+    if fmt != scetlib_cache.FORMAT:
+        raise ValueError(
+            f"{cache_path}: cache format {fmt}, expected {scetlib_cache.FORMAT}"
+        )
+    if "has_muf" in d and bool(int(d["has_muf"])):
+        raise ValueError(
+            f"{cache_path} declares a muF member pair, which no longer exists -- "
+            "kappa_F rides the muF polynomial. Rebuild the cache."
+        )
+    n_eig = int(d["n_eig"])
+    if n_eig and not any(
+        str(n).startswith("pdf_eig") for n in sing.gradient_param_names()
+    ):
+        sing.set_pdf_eig_params(n_eig)
+        nons.set_pdf_eig_params(n_eig)
+    sing.load_bin_rules(rules_path)
+    nons.load_fo_cache_bytes(d["fo"].tobytes())
+    fn = cls(
+        sing,
+        nons,
+        bins=d["bins"],
+        n_eig=n_eig,
+        has_as=bool(int(d["has_as"])) if "has_as" in d else False,
+    )
+    fn.anchor = np.array(d["anchor"], dtype=np.float64)
+    stored = [str(x) for x in d["names"]]
+    if stored != fn.param_names:
+        raise ValueError(
+            "the cached rules were built for a different parameter set:\n"
+            f"  cached:  {stored}\n  current: {fn.param_names}"
+        )
+    return fn
 
 
 def config_as_dict(conf):
@@ -487,7 +582,33 @@ class ScetlibADXsec:
         if self.fo_muf_poly is not None:
             for _piece in (sing, nons):
                 _piece.set_fo_muf_poly(self.fo_muf_poly)
-        self._fn = ScetlibCachedXsecTF.load(self.cache_path, sing, nons)
+        # Announce this: it is the one genuinely slow step of start-up and the
+        # only one with no output, so a silent multi-minute pause here reads as
+        # a hang. The cost is reading and parsing the rule + fixed-order blobs
+        # off ceph -- 8.2 GB for the 260827 cache, ~4x that for a v10 one.
+        try:
+            _sz = os.path.getsize(self.cache_path) / 2**30
+            _szs = f"{_sz:.1f} GB"
+        except OSError:
+            _szs = "size unknown"
+        print(
+            f"[scetlib_ad] loading cache ({_szs}) {self.cache_path} ...",
+            flush=True,
+        )
+        _t0 = time.time()
+        _rules = _raw_rules_path(self.cache_path)
+        if _rules is not None:
+            print(f"[scetlib_ad]   rules from the extracted {_rules}", flush=True)
+            self._fn = _load_with_raw_rules(
+                ScetlibCachedXsecTF, self.cache_path, _rules, sing, nons
+            )
+        else:
+            self._fn = ScetlibCachedXsecTF.load(self.cache_path, sing, nons)
+        print(
+            f"[scetlib_ad] cache loaded in {time.time() - _t0:.1f} s "
+            f"({len(self._fn._points)} bins, n_eig={n_eig})",
+            flush=True,
+        )
 
         self.param_names = list(self._fn.param_names)
         self.n_params = len(self.param_names)
