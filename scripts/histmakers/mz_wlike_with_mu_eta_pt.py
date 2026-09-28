@@ -398,6 +398,7 @@ diff_weights_helper = (
     scale_e=args.scale_e,
     scale_M=args.scale_M,
     make_uncertainty_helper=True,
+    smearing=not args.noSmearing,
 )
 z_non_closure_parametrized_helper, z_non_closure_binned_helper = (
     muon_calibration.make_Z_non_closure_helpers(
@@ -410,17 +411,29 @@ mc_calibration_helper, data_calibration_helper, calibration_uncertainty_helper =
 )
 
 closure_unc_helper = muon_calibration.make_closure_uncertainty_helper(
-    common.closure_filepaths["parametrized"]
+    common.closure_filepaths["parametrized"],
+    scale_var_method=args.muonScaleVariation,
+    smearing=not args.noSmearing,
 )
 closure_unc_helper_A = muon_calibration.make_uniform_closure_uncertainty_helper(
-    0, common.correlated_variation_base_size["A"]
+    0,
+    common.correlated_variation_base_size["A"],
+    scale_var_method=args.muonScaleVariation,
+    smearing=not args.noSmearing,
 )
 closure_unc_helper_M = muon_calibration.make_uniform_closure_uncertainty_helper(
-    2, common.correlated_variation_base_size["M"]
+    2,
+    common.correlated_variation_base_size["M"],
+    scale_var_method=args.muonScaleVariation,
+    smearing=not args.noSmearing,
 )
 
 smearing_helper, smearing_uncertainty_helper = (
-    (None, None) if args.noSmearing else muon_calibration.make_muon_smearing_helpers()
+    (None, None)
+    if args.noSmearing
+    else muon_calibration.make_muon_smearing_helpers(
+        scale_var_method=args.muonScaleVariation,
+    )
 )
 
 bias_helper = (
@@ -1538,11 +1551,17 @@ def build_graph(df, dataset):
                     )
                     input_kinematics.append(f"{reco_sel_GF}_response_weight")
 
-                # muon scale variation from stats. uncertainty on the jpsi massfit
+                # muon scale variation from stats. uncertainty on the jpsi
+                # massfit. Use ``jpsi_style_cols`` so the column list matches
+                # the helper (10-col ONNX vs. 7-col analytic Splines).
+                response_weight_col = f"{reco_sel_GF}_response_weight"
+                df, _scale_cols = muon_calibration.jpsi_style_cols(
+                    df, data_jpsi_crctn_unc_helper, reco_sel_GF, response_weight_col
+                )
                 df = df.Define(
                     "nominal_muonScaleSyst_responseWeights_tensor",
                     data_jpsi_crctn_unc_helper,
-                    [*input_kinematics, "nominal_weight"],
+                    [*_scale_cols, "nominal_weight"],
                 )
                 muonScaleSyst_responseWeights = df.HistoBoost(
                     "nominal_muonScaleSyst_responseWeights",
@@ -1590,10 +1609,16 @@ def build_graph(df, dataset):
                 if args.nonClosureScheme in ["A-M-separated", "A-only"]:
                     # add the ad-hoc Z non-closure nuisances from the jpsi massfit to muon scale unc
                     df = df.DefinePerSample("AFlag", "0x01")
+                    df, _znc_cols = muon_calibration.jpsi_style_cols(
+                        df,
+                        z_non_closure_parametrized_helper,
+                        reco_sel_GF,
+                        response_weight_col,
+                    )
                     df = df.Define(
                         "Z_non_closure_parametrized_A",
                         z_non_closure_parametrized_helper,
-                        [*input_kinematics, "nominal_weight", "AFlag"],
+                        [*_znc_cols, "nominal_weight", "AFlag"],
                     )
                     hist_Z_non_closure_parametrized_A = df.HistoBoost(
                         "nominal_Z_non_closure_parametrized_A",
@@ -1610,10 +1635,16 @@ def build_graph(df, dataset):
                     "M-only",
                 ]:
                     df = df.DefinePerSample("MFlag", "0x04")
+                    df, _znc_cols = muon_calibration.jpsi_style_cols(
+                        df,
+                        z_non_closure_parametrized_helper,
+                        reco_sel_GF,
+                        response_weight_col,
+                    )
                     df = df.Define(
                         "Z_non_closure_parametrized_M",
                         z_non_closure_parametrized_helper,
-                        [*input_kinematics, "nominal_weight", "MFlag"],
+                        [*_znc_cols, "nominal_weight", "MFlag"],
                     )
                     hist_Z_non_closure_parametrized_M = df.HistoBoost(
                         "nominal_Z_non_closure_parametrized_M",
@@ -1626,10 +1657,16 @@ def build_graph(df, dataset):
 
                 if args.nonClosureScheme == "A-M-combined":
                     df = df.DefinePerSample("AMFlag", "0x01 | 0x04")
+                    df, _znc_cols = muon_calibration.jpsi_style_cols(
+                        df,
+                        z_non_closure_parametrized_helper,
+                        reco_sel_GF,
+                        response_weight_col,
+                    )
                     df = df.Define(
                         "Z_non_closure_parametrized",
                         z_non_closure_parametrized_helper,
-                        [*input_kinematics, "nominal_weight", "AMFlag"],
+                        [*_znc_cols, "nominal_weight", "AMFlag"],
                     )
                     hist_Z_non_closure_parametrized = df.HistoBoost(
                         (
@@ -1645,10 +1682,13 @@ def build_graph(df, dataset):
                     results.append(hist_Z_non_closure_parametrized)
 
                 # extra uncertainties from non-closure stats
+                df, _cl_cols = muon_calibration.jpsi_style_cols(
+                    df, closure_unc_helper, reco_sel_GF, response_weight_col
+                )
                 df = df.Define(
                     "muonScaleClosSyst_responseWeights_tensor_splines",
                     closure_unc_helper,
-                    [*input_kinematics, "nominal_weight"],
+                    [*_cl_cols, "nominal_weight"],
                 )
                 nominal_muonScaleClosSyst_responseWeights = df.HistoBoost(
                     "nominal_muonScaleClosSyst_responseWeights",
@@ -1660,10 +1700,13 @@ def build_graph(df, dataset):
                 results.append(nominal_muonScaleClosSyst_responseWeights)
 
                 # extra uncertainties for A (fully correlated)
+                df, _cl_cols_A = muon_calibration.jpsi_style_cols(
+                    df, closure_unc_helper_A, reco_sel_GF, response_weight_col
+                )
                 df = df.Define(
                     "muonScaleClosASyst_responseWeights_tensor_splines",
                     closure_unc_helper_A,
-                    [*input_kinematics, "nominal_weight"],
+                    [*_cl_cols_A, "nominal_weight"],
                 )
                 nominal_muonScaleClosASyst_responseWeights = df.HistoBoost(
                     "nominal_muonScaleClosASyst_responseWeights",
@@ -1675,10 +1718,13 @@ def build_graph(df, dataset):
                 results.append(nominal_muonScaleClosASyst_responseWeights)
 
                 # extra uncertainties for M (fully correlated)
+                df, _cl_cols_M = muon_calibration.jpsi_style_cols(
+                    df, closure_unc_helper_M, reco_sel_GF, response_weight_col
+                )
                 df = df.Define(
                     "muonScaleClosMSyst_responseWeights_tensor_splines",
                     closure_unc_helper_M,
-                    [*input_kinematics, "nominal_weight"],
+                    [*_cl_cols_M, "nominal_weight"],
                 )
                 nominal_muonScaleClosMSyst_responseWeights = df.HistoBoost(
                     "nominal_muonScaleClosMSyst_responseWeights",
