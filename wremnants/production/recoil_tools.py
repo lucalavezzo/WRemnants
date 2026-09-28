@@ -101,12 +101,14 @@ def METXYCorrectionHelper(fIn):
 
 class Recoil:
 
-    def __init__(self, pu_type, args, flavor="mu"):
+    def __init__(self, pu_type, args, flavor="mu", qt_max=None):
 
         self.met = args.met
         self.flavor = flavor
         self.args = args
         self.storeHists = args.recoilHists
+        # evaluate the calibration at min(ptV, qt_max), W only, see apply_recoil_W
+        self.qt_max = qt_max
         self.pu_type = pu_type
         self.isW = False
         self.recoil_unc_stat_weights_with_nom = ""
@@ -1385,10 +1387,10 @@ class Recoil:
                 # ~150 GeV, where the model extrapolates (the response correction runs
                 # away and the resolution collapses). Optionally evaluate it at a capped
                 # boson pt, keeping the true one for the decomposition and for the MET.
-                if self.args.recoilQtMax is not None:
+                if self.qt_max is not None:
                     self.df = self.df.Define(
                         "v_gen_pt_recoil",
-                        f"std::min<double>(v_gen_pt, {self.args.recoilQtMax})",
+                        f"std::min<double>(v_gen_pt, {self.qt_max})",
                     )
                 else:
                     self.df = self.df.Alias("v_gen_pt_recoil", "v_gen_pt")
@@ -1434,7 +1436,7 @@ class Recoil:
                 "met_corr_rec_y", "met_corr_rec_pt*sin(met_corr_rec_phi)"
             )
 
-            if self.args.recoilQtMax is not None and self.recoilHelper != None:
+            if self.qt_max is not None and self.recoilHelper != None:
                 # the same calibration evaluated at the uncapped boson pt, stored as the
                 # systematic variation that covers the extrapolation
                 self.df = self.df.Define(
@@ -1474,7 +1476,7 @@ class Recoil:
         self.df = self.df.Alias("MET_corr_rec_pt", "met_corr_rec_pt")
         self.df = self.df.Alias("MET_corr_rec_phi", "met_corr_rec_phi")
 
-        if self.args.recoilQtMax is not None:
+        if self.qt_max is not None:
             # no variation for the processes without a recoil calibration
             if not self.df.HasColumn("met_corr_rec_qt_extrap_pt"):
                 self.df = self.df.Alias("met_corr_rec_qt_extrap_pt", "met_corr_rec_pt")

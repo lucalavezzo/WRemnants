@@ -160,6 +160,12 @@ parser.add_argument(
     action="store_true",
     help="Store additional histograms using polynomial variations for muR and muF (standard binned variations are still produced).",
 )
+parser.add_argument(
+    "--recoilQtMax",
+    type=float,
+    default=None,
+    help="Evaluate the recoil calibration at min(ptV, RECOILQTMAX): the calibration is derived from Z events and has no statistics above ~150 GeV, where the model extrapolates. The uncapped calibration is stored as a systematic variation (nominal_recoilQtExtrap)",
+)
 
 args = parser.parse_args()
 
@@ -717,7 +723,9 @@ if args.muRmuFPolVar:
 if not args.noRecoil:
     from wremnants.production import recoil_tools
 
-    recoilHelper = recoil_tools.Recoil("highPU", args, flavor="mu")
+    recoilHelper = recoil_tools.Recoil(
+        "highPU", args, flavor="mu", qt_max=args.recoilQtMax
+    )
 
 seed_data = 2 * args.randomSeedForToys
 seed_mc = 2 * args.randomSeedForToys + 1
