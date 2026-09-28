@@ -115,8 +115,11 @@ def configure(config_path, threads=0, diff_scales=True, fo_resolve_muR=True):
     example, which now applies them too -- do not "simplify" either away.
 
     ``diff_scales`` registers muR and the three matching transition points as
-    differentiable parameters (``scale_kappa_R``, ``scale_x1..x3``, plus an inert
-    ``scale_kappa_F`` slot that ``build_pdf_variations`` ties the muF pair to).
+    differentiable parameters (``scale_kappa_R``, ``scale_x1..x3``, plus
+    ``scale_kappa_F``, whose response is fixed-order only and since rules v9 /
+    fo v8 comes from the muF POLYNOMIAL -- ``_fo_resolve_muf_index`` ties it to
+    this slot by name. It used to come from the muF member pair, which those
+    versions dropped, so ``has_muf`` is always 0 now and means nothing).
     It REQUIRES ``muf_follows_muB = no``: with muf tied to muB a live kappa_R
     moves muF while the beam convolutions stay frozen at their own muF. It also
     changes the parameter registry, so a cache built without it cannot be loaded
@@ -164,6 +167,31 @@ def configure(config_path, threads=0, diff_scales=True, fo_resolve_muR=True):
         piece.set_gradient_threads(nthreads)
         piece.set_gradient_node_cache(True)
     return conf, sigma
+
+
+def config_as_dict(conf):
+    """A SCETlib runcard as ``{section: {key: str}}``.
+
+    Pass ``core.conf``, NOT the runcard file: that is the runcard LAYERED ON
+    SCETlib's ``defaults.conf``, which is what the calculation is actually
+    configured from. It matters for coverage. Against the bare file, 33 of a
+    correction's 107 keys have no counterpart and so cannot be compared at all
+    -- the eleven per-flavour ``lambda2_*``, ``lambda4_i``, ``lambda6``,
+    ``lambda6_nu``, ``np_model_tmd``, ``kappafo``, ``transition_type``,
+    ``scale_setting`` -- and those are exactly the ones that would matter if a
+    build defaulted them differently. Against the layered config every one of
+    the 107 has a counterpart (measured 2026-09-10), so the blind spot closes.
+
+    One definition, two callers, deliberately: the param model compares a
+    recorded correction config against this, and the cache-to-correction writer
+    RECORDS this. If the two ever disagreed about what "the cache's config" is,
+    the comparison would be against a different object than the one written,
+    which is the kind of difference that shows up as nothing at all.
+
+    Values stay STRINGS, exactly as SCETlib's config carries them, and
+    ``configparser`` has already lowercased the keys.
+    """
+    return {section: dict(conf[section]) for section in conf.sections()}
 
 
 def bins_from_gen_axes(gen_axes, Q_lo, Q_hi):
@@ -385,6 +413,12 @@ class ScetlibADXsec:
         fixed-order grid, bins, anchor and parameter names in one file.
     threads
         Worker threads for the batch replay (0 = one per hardware thread).
+    fo_muf_poly
+        Degree of the FIXED-ORDER muF polynomial, or ``None`` (default) to
+        leave SCETlib's own default of 6. ``0`` switches it off, which removes
+        the kappa_F response entirely -- see the note at the assignment below.
+        Nothing here checks that dropping it is safe; that is
+        ``SCETlibADParamModel._check_fo_muf_poly``.
     """
 
     @staticmethod
@@ -401,7 +435,7 @@ class ScetlibADXsec:
                 return None
             return [str(n) for n in z["names"]]
 
-    def __init__(self, conf_path, cache_path, threads=0):
+    def __init__(self, conf_path, cache_path, threads=0, fo_muf_poly=None):
         ScetlibCachedXsecTF = _import_cached_xsec()
         self.conf_path = os.path.abspath(conf_path)
         self.cache_path = os.path.abspath(cache_path)
@@ -433,6 +467,26 @@ class ScetlibADXsec:
         if n_eig:
             sing.set_pdf_eig_params(n_eig)
             nons.set_pdf_eig_params(n_eig)
+        # The fixed-order muF polynomial (set_fo_muf_poly, default 6 since
+        # scetlib-cms 77db3ba, 2026-09-09). It is NOT stored in any cache: it is
+        # rebuilt per (window, bin) on first evaluation, and building it means
+        # the V+jet analytic sweep over every node. Measured on the 770-bin
+        # 260914 cache: first value+jacobian 6200 s with it on against 8.8 s
+        # with it off, and 7.30 s against < 0.01 s warm. That cost is paid even
+        # when kappa_F is frozen, because values_and_jacobian() has no
+        # column-subset argument.
+        #
+        # OFF is not a revert to the old muF PAIR: scetlib-cms 8df8503 deleted
+        # those grids from the format (has_muf = 0 on any current cache), so off
+        # means kappa_F has NO response. At kappa_F = 1 the dispatch falls
+        # through to the plain stored grid (DrellYanAD.cpp:4309), so the central
+        # value is the same object either way -- measured, every Jacobian column
+        # except scale_kappa_F bitwise identical (the three transition columns
+        # at max|dJ| = 0 exactly) and sigma agreeing to 2.0e-16.
+        self.fo_muf_poly = None if fo_muf_poly is None else int(fo_muf_poly)
+        if self.fo_muf_poly is not None:
+            for _piece in (sing, nons):
+                _piece.set_fo_muf_poly(self.fo_muf_poly)
         self._fn = ScetlibCachedXsecTF.load(self.cache_path, sing, nons)
 
         self.param_names = list(self._fn.param_names)

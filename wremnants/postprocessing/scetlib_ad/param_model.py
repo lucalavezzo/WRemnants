@@ -23,10 +23,27 @@ calculation exposes is a continuous fit parameter with exact derivatives:
 
 * the profile scales           -- ``set_diff_scales(1)`` registers the
   resummation ``kappa_R`` and the three matching transition points
-  ``x1..x3`` as differentiable, so these no longer need template nuisances.
-  ``kappa_F`` gets a slot too but is INERT in the kernel: it does nothing
-  unless the cache was built with the muF member pair, and a fit that tries to
-  float it is refused (see :meth:`_check_no_inert_params`).
+  ``x1..x3`` as differentiable. The matching transition point IS profiled
+  directly; ``kappa_R`` and ``kappa_F`` are NOT, and that is deliberate -- see
+  "The scale uncertainty is an envelope" below. ``kappa_F`` has no RESUMMED-kernel
+  dependence; its response is entirely fixed-order, and since rules v9 / fo v8 it
+  rides the muF POLYNOMIAL rather than the muF member pair those versions
+  dropped, so it is live on any current cache. Whether a parameter actually
+  responds is MEASURED, never assumed
+  (see :meth:`_check_no_inert_params`).
+
+The scale uncertainty is an ENVELOPE, not a profiled parameter
+--------------------------------------------------------------
+``resumScaleMuR`` / ``resumScaleMuF`` are in :data:`params.DEFAULT_FROZEN`, and
+the mu_R / mu_F missing-higher-order uncertainty is carried instead by two frozen
+gen-level nuisances built at the anchor from the AN's 7-point envelope --
+:mod:`wremnants.postprocessing.scetlib_ad.scale_envelope`, which holds the
+prescription, the AN references and the two judgement calls (linear response;
+the hard 20 GeV cut). The short version: the analysis defines this uncertainty as
+an envelope, and a profiled ``kappa_F`` is ill-posed anyway because its response
+is EVEN in its own nuisance, so a symmetric prior gives two mirror minima.
+The transition points are a different story and stay profiled (Luca,
+2026-09-11).
 
 Which of these are present is a property of the cache, not of this file: the
 model reads ``gradient_param_names()`` and registers what it finds.
@@ -117,7 +134,15 @@ from wremnants.postprocessing.scetlib_ad.response import (
     crop_R_to_fit,
     marginalize_R_reco,
 )
-from wremnants.postprocessing.scetlib_ad.xsec_backend import ScetlibADXsec
+from wremnants.postprocessing.scetlib_ad.scale_envelope import (
+    KAPPA_F,
+    FrozenEnvelope,
+    scale_spec,
+)
+from wremnants.postprocessing.scetlib_ad.xsec_backend import (
+    ScetlibADXsec,
+    config_as_dict,
+)
 
 DTYPE = tf.float64
 
@@ -152,8 +177,15 @@ _CONFLICTS = (
     ),
     (
         r"^resumfoscale",
-        "the muR / muF profile scales",
-        lambda names: any(n in ("resumScaleMuR", "resumScaleMuF") for n in names),
+        "the muR / muF scale uncertainty",
+        # Either treatment collides with the card's own resumFOScale* templates:
+        # the directly profiled kappa_R / kappa_F, and the frozen 7-point
+        # envelope that replaced them (scale_envelope.py). Both are the same
+        # physics as those templates, so neither may run alongside them.
+        lambda names: any(
+            n in ("resumScaleMuR", "resumScaleMuF") + adp.SCALE_ENVELOPE_NAMES
+            for n in names
+        ),
     ),
     (
         r"^resumtransition",
@@ -242,6 +274,11 @@ class SCETlibADParamModel(ParamModel):
         anchor_source="correction",
         anchor_override=None,
         response_group=DEFAULT_RESPONSE_GROUP,
+        scale_envelope=True,
+        scale_envelope_qt_min=20.0,
+        scale_envelope_response="linear",
+        scale_envelope_points=3,
+        fo_muf_poly=None,
         **kwargs,
     ):
         """
@@ -314,6 +351,64 @@ class SCETlibADParamModel(ParamModel):
             ``knowledge/20_frameworks/gen_level_sigmaul_fit.md``: the ratio is
             still 1 at the start, so nothing looks broken, but the response is
             evaluated at the wrong point. Logged loudly every time.
+        scale_envelope
+            Assign the mu_R / mu_F missing-higher-order uncertainty as the AN's
+            symmetrized 7-point ENVELOPE (``scale_envelope.py``) instead of
+            profiling ``kappa_R`` and ``kappa_F``. Default ON, and the two
+            scale parameters are correspondingly in ``params.DEFAULT_FROZEN``.
+
+            This is not a tuning knob, it is the physics: the analysis defines
+            that uncertainty as an envelope (AN-25-085 ``uncerts.tex:173``), and
+            a directly profiled ``kappa_F`` is ill-posed because its response is
+            EVEN in the nuisance, so a symmetric prior has two mirror minima.
+            Switching it off restores neither treatment on its own -- the scales
+            stay frozen unless they are named explicitly in ``fit_params``, and
+            doing that WITH the envelope on is refused as a double count.
+        scale_envelope_qt_min
+            Hard-zero the envelope below this gen qT, in GeV. Default 20, which
+            is where the AN says the scale uncertainty stops mattering ("a
+            negligible effect at ptll < 20 GeV", ``uncerts.tex:178``). NB the AN
+            states that as an observation, not as a cut: imposing it is a
+            decision (Luca, 2026-09-11), taken because the profiled treatment
+            put 93 % of its leverage below 10 GeV. ``nan`` applies the envelope
+            everywhere, which is the comparison that shows what the cut does.
+
+            A gen bin carries the uncertainty only if its LOWER edge is at or
+            above the threshold; a bin straddling it is zeroed. Whether the
+            threshold IS an edge of this card's gen binning is reported at
+            construction.
+        scale_envelope_response
+            ``"linear"`` (default) applies the envelope as
+            ``1 + theta . k``; ``"lognormal"`` as ``exp(theta . k)``, which is
+            rabbit's own card convention. Linear is what makes the direction
+            exactly odd in theta. They differ by k^2/2 -- 0.3 % of the yield at
+            |theta| = 1 in this card's largest envelope bin -- so the switch
+            exists to measure that rather than to argue about it.
+        scale_envelope_points
+            ``3`` (DEFAULT, decided by Luca 2026-09-11: "copy the datacard
+            one") is mu_R alone -- the point set the production datacard's
+            ``resumFOScaleZ`` is actually built from, i.e.
+            ``theory_corrections.renorm_scale_vars`` at
+            ``theory_corrections.py:959``, consumed as
+            ``renorm_scale_pt20_envelope`` in ``syst_tools.py:540,560``.
+            ``7`` is the envelope the AN TEXT describes, over (mu_R, mu_F):
+            ``theory_corrections.renorm_fact_scale_vars`` at
+            ``theory_corrections.py:961-969``, which the correction file also
+            computes -- as ``renorm_fact_scale_pt20_envelope`` -- but which no
+            datacard picks up. The two are NOT the same uncertainty: measured on
+            this card the 7-point one is +45 % in ``SymAvg`` and -42 % in
+            ``SymDiff``, because the mu_F legs genuinely add to it. We match the
+            DATACARD, so ``3``; ``7`` stays available to quantify the gap.
+        fo_muf_poly
+            Degree of the FIXED-ORDER muF polynomial, or ``None`` (DEFAULT) to
+            leave SCETlib's own default of 6, i.e. upstream behaviour. ``0``
+            switches it off: a ~700x faster first evaluation (6200 s -> 8.8 s on
+            the 770-bin 260914 cache, and 7.30 s -> < 0.01 s warm) at the cost
+            of the kappa_F derivative, which goes away entirely. Nothing else
+            moves -- measured, every other Jacobian column bitwise identical and
+            sigma to 2.0e-16. Default is None rather than 0 so the speed-up is
+            opted into, never silent. ``_check_fo_muf_poly`` refuses the two
+            configurations that would then be quietly wrong.
         anchor_override
             ``name=value,...`` supplying a central value the correction does not
             record, for the one case where neither artefact has it: a runcard
@@ -335,7 +430,7 @@ class SCETlibADParamModel(ParamModel):
         self.gen_level = bool(gen_level)
 
         # ---- Backend: rebuild the calculation and load the cache.
-        self.core = ScetlibADXsec(conf, cache, threads=threads)
+        self.core = ScetlibADXsec(conf, cache, threads=threads, fo_muf_poly=fo_muf_poly)
         self.scetlib_names = list(self.core.param_names)
         self.rabbit_names = [adp.rabbit_name(n) for n in self.scetlib_names]
         # ---- The anchor: the point the prediction is a RATIO TO. It comes
@@ -350,6 +445,19 @@ class SCETlibADParamModel(ParamModel):
         self._conf_path = conf
         self.pdf_coeff_scale = self._resolve_pdf_coeff_scale(pdf_coeff_scale)
 
+        # ---- The scale ENVELOPE. Resolved before registration because its two
+        # nuisances are extra fitted parameters; evaluated after, because it
+        # needs the anchor vector the registration builds.
+        self._env_spec = None
+        if scale_envelope:
+            qt_min = float(scale_envelope_qt_min)
+            self._env_spec = scale_spec(
+                int(scale_envelope_points),
+                qt_min=None if np.isnan(qt_min) else qt_min,
+                name=adp.SCALE_ENVELOPE_STEM,
+                response=str(scale_envelope_response),
+            )
+
         # ---- Parameter registration. Everything the fit does NOT expose stays
         # pinned at the anchor, so the SCETlib vector is always complete.
         self._register_params(fit_params, poi_params, xparam_default)
@@ -359,6 +467,7 @@ class SCETlibADParamModel(ParamModel):
         # own template looks like.
         sigma_gen_anchor = self._sigma_gen_np(self._p_base_anchor)
         self.sigma_gen_central_flat = tf.constant(sigma_gen_anchor, dtype=DTYPE)
+        self._build_scale_envelope(sigma_gen_anchor)
         if self.gen_level:
             self.sigma_reco_central = None
         else:
@@ -375,6 +484,7 @@ class SCETlibADParamModel(ParamModel):
 
         self._check_double_counting()
         self._check_no_inert_params()
+        self._check_fo_muf_poly()
 
         # ---- Process column.
         procs = [p.decode() if isinstance(p, bytes) else str(p) for p in indata.procs]
@@ -395,7 +505,15 @@ class SCETlibADParamModel(ParamModel):
         print(
             f"[SCETlibADParamModel] {self.core} | {self._fold.describe()} | "
             f"{'gen-level' if self.gen_level else 'reco'} | "
-            f"fitting {self.nparams} of {self.core.n_params} "
+            f"fitting {self._n_scetlib} of {self.core.n_params} SCETlib "
+            f"parameter(s)"
+            + (
+                f" + {len(self._env_names)} envelope nuisance(s) "
+                f"{list(self._env_names)}"
+                if self._env_names
+                else ""
+            )
+            + f" = {self.nparams} total "
             f"({self.npoi} POI: {[n for n in self._param_order[: self.npoi]]})",
             flush=True,
         )
@@ -576,6 +694,22 @@ class SCETlibADParamModel(ParamModel):
                 f"cache's parameter set {available}. A parameter can only be "
                 f"fitted if the runcard declared it before the rules were built."
             )
+        # The envelope and the directly profiled scales are the SAME physics.
+        # Naming the scales in fit_params overrides DEFAULT_FROZEN, which is the
+        # documented way to run the old treatment -- but only with the envelope
+        # switched off, or the uncertainty is counted twice.
+        if self._env_spec is not None:
+            both = [n for n in requested if n in ("resumScaleMuR", "resumScaleMuF")]
+            if both:
+                raise ValueError(
+                    f"SCETlibADParamModel: fit_params names {both} while the "
+                    f"7-point scale envelope is on. Both describe the mu_R / "
+                    f"mu_F missing-higher-order uncertainty, so running them "
+                    f"together double-counts it. Pass scale_envelope=0 to "
+                    f"profile the scales directly (which is the treatment the "
+                    f"envelope replaced -- see scale_envelope.py), or drop them "
+                    f"from fit_params."
+                )
         # Floating a direction whose response we have measured to be wrong is
         # allowed -- it is how the fix gets tested -- but never silently.
         for n in requested:
@@ -594,17 +728,29 @@ class SCETlibADParamModel(ParamModel):
                 f"fit_params {list(requested)}."
             )
         # rabbit's layout contract: all POIs first, then the POUs.
+        #
+        # Two blocks, in this order: the SCETlib parameters (POIs then POUs),
+        # then any envelope nuisances. The SCETlib block is therefore a
+        # contiguous PREFIX of rabbit's vector, which is what lets every path
+        # that talks to SCETlib slice ``param[:self._n_scetlib]`` and lets the
+        # envelope read the tail. The envelope nuisances are not SCETlib
+        # parameters at all -- no anchor, no reparametrisation, no Jacobian
+        # column -- so they must not enter _fit_idx / _select / _rp_*.
         nou = tuple(n for n in requested if n not in pois)
-        self._param_order = tuple(pois) + nou
+        self._scetlib_order = tuple(pois) + nou
+        self._n_scetlib = len(self._scetlib_order)
+        env_names = () if self._env_spec is None else self._env_spec.param_names
+        self._env_names = tuple(env_names)
+        self._param_order = self._scetlib_order + self._env_names
         self.npoi = len(pois)
-        self.npou = len(nou)
+        self.npou = len(nou) + len(self._env_names)
         self.params = np.array([p.encode() for p in self._param_order])
 
         # Position of each fitted parameter inside SCETlib's own vector. rabbit's
         # vector is NOT SCETlib's: it holds only what we fit, POIs first, while
         # SCETlib's has every registered parameter in its registry order.
         self._fit_idx = np.array(
-            [available.index(n) for n in self._param_order], dtype=np.int64
+            [available.index(n) for n in self._scetlib_order], dtype=np.int64
         )
         # The map from rabbit's vector to SCETlib's, as a constant 0/1 matrix.
         # Deliberately NOT tensor_scatter_nd_update: a scatter's backward pass
@@ -614,20 +760,20 @@ class SCETlibADParamModel(ParamModel):
         # a dense gradient, so differentiation survives at second
         # order. Bit-identical to the scatter (the entries are exactly 0 and 1)
         # and negligible in cost: (n_scetlib, n_fit) is at most ~25 x 25.
-        self._select = np.zeros((len(available), len(self._param_order)))
-        self._select[self._fit_idx, np.arange(len(self._param_order))] = 1.0
+        self._select = np.zeros((len(available), self._n_scetlib))
+        self._select[self._fit_idx, np.arange(self._n_scetlib)] = 1.0
 
         # Reparametrisation (see params.REPARAM): for the profile scales the
         # FITTED parameter is a unit nuisance theta and the PHYSICAL value handed
         # to SCETlib is a function of it. Stored as coefficient vectors so one
         # vectorised expression covers every parameter, identity included, and
         # the TF path stays a handful of elementwise ops with exact derivatives.
-        n_fit = len(self._param_order)
+        n_fit = self._n_scetlib
         self._rp_log = np.zeros(n_fit, dtype=bool)
         self._rp_quad = np.zeros(n_fit, dtype=bool)
         self._rp_L = np.zeros(n_fit)
         self._rp_c = np.zeros((3, n_fit))
-        for i, name in enumerate(self._param_order):
+        for i, name in enumerate(self._scetlib_order):
             spec = adp.reparam(name)
             if spec is None:
                 continue
@@ -661,12 +807,12 @@ class SCETlibADParamModel(ParamModel):
         # than at scale as the template route is forced to do.
         self._rp_scale = np.ones(n_fit)
         if self.pdf_coeff_scale != 1.0:
-            for i, name in enumerate(self._param_order):
+            for i, name in enumerate(self._scetlib_order):
                 if name.startswith(adp.PDF_PREFIX_OUT):
                     self._rp_scale[i] = self.pdf_coeff_scale
         self._reparametrised = tuple(
             n
-            for n, f in zip(self._param_order, ~self._rp_id | (self._rp_scale != 1.0))
+            for n, f in zip(self._scetlib_order, ~self._rp_id | (self._rp_scale != 1.0))
             if f
         )
 
@@ -687,7 +833,7 @@ class SCETlibADParamModel(ParamModel):
             bad = [
                 (n, float(a), float(b))
                 for n, a, b in zip(
-                    self._param_order, round_trip, self._anchor[self._fit_idx]
+                    self._scetlib_order, round_trip, self._anchor[self._fit_idx]
                 )
                 if abs(a - b) > 1e-12
             ]
@@ -699,8 +845,13 @@ class SCETlibADParamModel(ParamModel):
                 "longer matches the correction's own value trips this. That is "
                 "the intended refusal: fix REPARAM, do not move the anchor."
             )
+        # The envelope nuisances are unit nuisances centred on zero: theta = 0
+        # is the anchor prediction, which is what keeps the ratio exactly 1 at
+        # the start. They are appended AFTER the round-trip check because that
+        # check is about the SCETlib reparametrisation maps.
+        defaults = np.concatenate([defaults, np.zeros(len(self._env_names))])
         for name, val in _parse_kv(xparam_default).items():
-            if name not in available:
+            if name not in available and name not in self._env_names:
                 raise KeyError(f"xparam_default: unknown parameter {name!r}")
             if name in self._param_order:
                 defaults[self._param_order.index(name)] = val
@@ -819,24 +970,18 @@ class SCETlibADParamModel(ParamModel):
     def _cache_config(self):
         """The cache's runcard as ``{section: {key: str}}``.
 
-        ``core.conf``, not the runcard file: that is the runcard LAYERED ON
-        SCETlib's ``defaults.conf``, which is what the calculation is actually
-        configured from. It matters for coverage. Against the bare file, 33 of
-        the correction's 107 keys have no counterpart and so cannot be compared
-        at all -- the eleven per-flavour ``lambda2_*``, ``lambda4_i``,
-        ``lambda6``, ``lambda6_nu``, ``np_model_tmd``, ``kappafo``,
-        ``transition_type``, ``scale_setting`` -- and those are exactly the ones
-        that would matter if a build defaulted them differently. Against the
-        layered config every one of the 107 has a counterpart (measured
-        2026-09-10), so the blind spot closes.
+        Delegated to :func:`xsec_backend.config_as_dict`, which is the single
+        definition and carries the reasoning for why it is ``core.conf`` and
+        not the runcard file. The cache-to-correction writer records that same
+        object, so the config this is compared against is the config that was
+        written.
 
         The residual asymmetry: these are TODAY's defaults, while the correction
         side is the config SCETlib resolved when it ran. A ``defaults.conf`` edit
         since then therefore reads as a real difference -- which, for the cache,
         it is.
         """
-        conf = self.core.conf
-        return {section: dict(conf[section]) for section in conf.sections()}
+        return config_as_dict(self.core.conf)
 
     def _resolve_anchor(self, anchor_source, anchor_override):
         """The anchor vector over ``self.rabbit_names``, and the config check.
@@ -1027,6 +1172,131 @@ class SCETlibADParamModel(ParamModel):
             return cache_anchor
         return anchor
 
+    def _sigma_gen_overrides(self, overrides):
+        """sigma_gen (flat) at the ANCHOR with PHYSICAL overrides applied.
+
+        The envelope legs go through here rather than through the fit vector:
+        they are evaluated at physical (kappa_R, kappa_F), never at a theta, so
+        no reparametrisation is involved and the legs land exactly on the
+        members the cache was built with (kappa_F = 0.5, 1, 2).
+        """
+        p = self._p_base_anchor.copy()
+        for name, val in overrides.items():
+            if name not in self.rabbit_names:
+                raise KeyError(
+                    f"scale_envelope: this cache has no parameter {name!r}; it "
+                    f"carries {self.rabbit_names}. The envelope legs need the "
+                    f"profile scales, which means a cache built with "
+                    f"set_diff_scales(1) and the muF member pair."
+                )
+            p[self.rabbit_names.index(name)] = float(val)
+        return self._sigma_gen_np(p)
+
+    def _build_scale_envelope(self, sigma_gen_anchor):
+        """Evaluate the frozen scale envelope, ONCE, at the anchor."""
+        self._scale_env = None
+        if self._env_spec is None:
+            return
+        spec = self._env_spec
+        # The nominal leg must BE the anchor, or the envelope would be taken
+        # around a different point from the one the ratio divides by.
+        for name, want in spec.legs[0].items():
+            have = float(self._anchor[self.rabbit_names.index(name)])
+            if abs(have - want) > 1e-12:
+                raise ValueError(
+                    f"SCETlibADParamModel: the scale envelope's nominal leg is "
+                    f"{name} = {want:g} but the anchor has {have:g}. The "
+                    f"envelope has to be taken around the ratio's own "
+                    f"denominator; a runcard whose central scale choice is not "
+                    f"1 needs the legs rescaled onto it, which is not "
+                    f"implemented."
+                )
+        self._scale_env = FrozenEnvelope(
+            spec,
+            self._sigma_gen_overrides,
+            self.gen_axes,
+            sigma_nom=sigma_gen_anchor,
+            dtype=DTYPE,
+        )
+        # Is the threshold a gen-bin edge? If it is not, the stated convention
+        # (a bin counts only if its LOWER edge clears the threshold) is doing
+        # something, so say so rather than leave it to be discovered.
+        edge_note = ""
+        if spec.qt_min is not None:
+            edges = self.gen_axes[spec.qt_axis_index][1]
+            on_edge = bool(np.any(np.isclose(edges, spec.qt_min, rtol=0, atol=1e-9)))
+            if on_edge:
+                edge_note = f" | {spec.qt_min:g} GeV IS a gen-bin edge"
+            else:
+                nxt = edges[edges >= spec.qt_min]
+                edge_note = (
+                    f" | WARNING {spec.qt_min:g} GeV is NOT a gen-bin edge; the "
+                    f"envelope starts at the next edge up, "
+                    f"{float(nxt[0]) if nxt.size else float('nan'):g} GeV"
+                )
+        print(
+            f"[SCETlibADParamModel] scale envelope {self._scale_env.describe()}"
+            f"{edge_note}",
+            flush=True,
+        )
+
+    def _check_fo_muf_poly(self):
+        """Refuse the two configurations that need a live kappa_F response.
+
+        ``fo_muf_poly=0`` buys a ~700x faster first evaluation (6200 s -> 8.8 s
+        on the 770-bin 260914 cache) by not building the fixed-order muF
+        polynomial, which no cache stores and every process therefore rebuilds.
+        What it costs is the kappa_F derivative OUTRIGHT -- not accuracy in that
+        direction, the whole column. Measured on that switch, every other
+        Jacobian column is bitwise identical, the three transition points
+        included (max|dJ| = 0 exactly against |J| = 0.14..0.27), and sigma
+        agrees to 2.0e-16. The transition points are untouched because the
+        FIXED-ORDER muF is ``_muFO(Q)``, a function of Q alone; it is the
+        RESUMMED piece where muF follows muB(bT), and that is a different
+        polynomial (``set_muf_poly``) which stays on.
+
+        So the switch is safe exactly while nothing needs d/d(kappa_F), and
+        both ways of needing it are silent rather than loud:
+
+        * a FITTED ``resumScaleMuF`` gets a zero Jacobian column, i.e. a zero
+          row and column of the NLL Hessian and a singular covariance.
+          ``_check_no_inert_params`` will not catch it -- it measures the
+          derivative at the start point, where the column is legitimately zero
+          rather than absent, and it only inspects the fitted subset anyway.
+        * an envelope whose legs MOVE kappa_F (the AN's 7-point set) gets legs
+          identical to nominal, so the envelope comes out SILENTLY TOO NARROW.
+          Checked against the legs rather than the point count, so a custom set
+          is caught too.
+        """
+        if getattr(self.core, "fo_muf_poly", None) != 0:
+            return
+        if KAPPA_F in self._scetlib_order:
+            raise ValueError(
+                f"SCETlibADParamModel: fo_muf_poly=0 removes the fixed-order "
+                f"kappa_F derivative, but {KAPPA_F!r} is being FITTED. Its "
+                f"Jacobian column would be identically zero and the covariance "
+                f"singular. Either drop it from fit_params (it is in "
+                f"params.DEFAULT_FROZEN for independent reasons) or leave "
+                f"fo_muf_poly at its default."
+            )
+        if self._env_spec is not None:
+            moved = [
+                i
+                for i, leg in enumerate(self._env_spec.legs)
+                if float(leg.get(KAPPA_F, 1.0)) != 1.0
+            ]
+            if moved:
+                raise ValueError(
+                    f"SCETlibADParamModel: fo_muf_poly=0 removes the "
+                    f"fixed-order kappa_F derivative, but the scale envelope "
+                    f"{self._env_spec.name!r} has {len(moved)} leg(s) that move "
+                    f"{KAPPA_F} (indices {moved}). Those legs would evaluate "
+                    f"identical to nominal and the envelope would be silently "
+                    f"too narrow. Use the 3-point mu_R-only envelope "
+                    f"(scale_envelope_points=3, the default) or leave "
+                    f"fo_muf_poly at its default."
+                )
+
     def _check_no_inert_params(self):
         """Refuse a fitted parameter the prediction does not depend on.
 
@@ -1042,7 +1312,7 @@ class SCETlibADParamModel(ParamModel):
         scale = np.max(np.abs(J)) or 1.0
         dead = [
             n
-            for i, n in enumerate(self._param_order)
+            for i, n in enumerate(self._scetlib_order)
             if np.max(np.abs(J[:, i])) <= 1e-12 * scale
         ]
         if dead:
@@ -1052,6 +1322,31 @@ class SCETlibADParamModel(ParamModel):
                 f"the covariance singular: {', '.join(dead)}. Drop them from "
                 f"fit_params."
             )
+        # The envelope nuisances have no SCETlib Jacobian column -- their
+        # response IS their frozen shape -- so they need their own check, and it
+        # is not hypothetical: a qT threshold above every gen bin, or a card
+        # whose gen binning stops below it, leaves a shape that is identically
+        # zero and therefore a singular covariance.
+        if self._scale_env is not None:
+            env_dead = [
+                n
+                for n, k in zip(
+                    self._scale_env.param_names,
+                    (self._scale_env.k_avg, self._scale_env.k_diff),
+                )
+                if not np.any(k != 0.0)
+            ]
+            if env_dead:
+                raise ValueError(
+                    f"SCETlibADParamModel: the scale-envelope nuisance(s) "
+                    f"{', '.join(env_dead)} are identically zero over this "
+                    f"card's gen binning, so the prediction does not depend on "
+                    f"them and the covariance would be singular. Either the qT "
+                    f"threshold ({self._env_spec.qt_min} GeV) is above every gen "
+                    f"bin, or the envelope really is degenerate (a perfectly "
+                    f"symmetric envelope makes SymDiff vanish -- in which case "
+                    f"it carries no information and should not be fitted)."
+                )
 
     def _check_double_counting(self):
         """Refuse a card that still carries the templates our parameters replace."""
@@ -1080,10 +1375,12 @@ class SCETlibADParamModel(ParamModel):
     # =========================================================================
 
     def _physical(self, theta):
-        """Fit values -> the PHYSICAL values SCETlib expects (numpy).
+        """SCETlib-block fit values -> the PHYSICAL values SCETlib expects.
 
         Identity for everything except the reparametrised profile scales; see
-        params.REPARAM for why those are unit nuisances.
+        params.REPARAM for why those are unit nuisances. ``theta`` is the
+        SCETlib block ONLY, i.e. ``param[:self._n_scetlib]``: the envelope
+        nuisances are not SCETlib parameters and have no physical map.
         """
         t = np.asarray(theta, dtype=np.float64)
         return (
@@ -1114,9 +1411,13 @@ class SCETlibADParamModel(ParamModel):
         )
 
     def _full_vector(self, fit_values):
-        """Fitted values -> the complete SCETlib parameter vector."""
+        """Fitted values -> the complete SCETlib parameter vector.
+
+        Takes the whole rabbit vector and drops the envelope tail, which SCETlib
+        knows nothing about.
+        """
         p = self._p_base.copy()
-        p[self._fit_idx] = self._physical(fit_values)
+        p[self._fit_idx] = self._physical(np.asarray(fit_values)[: self._n_scetlib])
         return p
 
     def _sigma_gen_np(self, p_full):
@@ -1132,7 +1433,13 @@ class SCETlibADParamModel(ParamModel):
         contracts Hessian-vector products -- so nested tapes work and TF drives
         every C++ call. Nothing here is a surrogate; autodiff sees the real thing.
         """
-        p = self._physical_tf(param)
+        # A SLICE, deliberately, where the module docstring forbids a scatter:
+        # a scatter's backward pass contains a gather (tf.IndexedSlices, which
+        # the bridge's second-order payloads cannot .numpy()), while
+        # StridedSliceGrad returns a dense zero-padded tensor, so second order
+        # survives. The SCETlib block is a contiguous prefix for exactly this
+        # reason (see _register_params).
+        p = self._physical_tf(param[: self._n_scetlib])
         # held = the non-fitted slots at their anchor, zero where we fit, so
         # held + S.p reconstructs the full vector. See _select on why this is a
         # matmul and not a scatter.
@@ -1146,6 +1453,14 @@ class SCETlibADParamModel(ParamModel):
     def _ratio_from_param(self, param):
         """Per-fit-bin ratio to the anchor prediction, softly floored positive."""
         sigma_gen = self._sigma_gen(param)
+        if self._scale_env is not None:
+            nsc = self._n_scetlib
+            # A gen-level template: the envelope multiplies sigma_gen BEFORE the
+            # response fold, so it reaches reco exactly the way the production
+            # resumFOScale* templates did. Frozen at the anchor, so this is a
+            # constant shape times a linear function of two thetas -- no max(),
+            # nothing non-differentiable, and exactly odd in each theta.
+            sigma_gen = sigma_gen * self._scale_env.factor_tf(param[nsc:])
         if self.gen_level:
             ratio = sigma_gen / self.sigma_gen_central_flat
         else:

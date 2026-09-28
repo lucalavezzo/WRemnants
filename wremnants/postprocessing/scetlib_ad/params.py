@@ -34,9 +34,16 @@ EXPLICIT_NAMES = {
     "np_gnu_lambda6": "lambda6_nu",
     "np_gnu_b0_bmax": "b0_over_bmax_nu",
     # Profile scales and matching transition points, registered by
-    # set_diff_scales(1). scale_kappa_F is inert in the kernel -- the slot exists
-    # only for build_pdf_variations to tie the muF member pair to -- so it does
-    # nothing unless the cache was built with has_muf.
+    # set_diff_scales(1). scale_kappa_F has no RESUMMED-kernel dependence; its
+    # whole response is fixed-order. That response used to require the muF member
+    # PAIR, which is where the old "inert unless the cache has has_muf" rule came
+    # from -- but rules v9 / fo v8 DROPPED the pair and put kappa_F on the tape
+    # through the muF polynomial (DrellYanAD.cpp set_fo_muf_poly, tied to this
+    # slot by name in _fo_resolve_muf_index). So it is live on any current cache,
+    # and it is more accurate there: the pair interpolated quadratically between
+    # three frozen grids and was 12-20x worse away from its anchors (0.5, 1, 2).
+    # has_muf is consequently ALWAYS 0 now and is no longer a capability flag --
+    # do not branch on it. _check_no_inert_params measures the response instead.
     "scale_kappa_R": "resumScaleMuR",
     "scale_kappa_F": "resumScaleMuF",
     "scale_x1": "resumTransition1",
@@ -330,6 +337,40 @@ DEFAULT_FROZEN = (
     # the PRIOR_SIGMAS comment. Float these two only as a deliberate study.
     "resumTransition1",
     "resumTransition3",
+    # The mu_R / mu_F profile scales. NOT frozen because their response is
+    # wrong -- it is validated (1.0e-04..2.4e-04 in yield against the six
+    # production templates, studies/.../260908-slides-validation/
+    # reco_variations.csv) -- but because PROFILING them is the wrong physics.
+    # The analysis assigns the missing-higher-order uncertainty as the ENVELOPE
+    # of the 7 (mu_R, mu_F) variations, symmetrized quadratically
+    # (AN-25-085 uncerts.tex:173), and that is what the model now builds at the
+    # anchor: see scale_envelope.py, and SCALE_ENVELOPE_NAMES below.
+    #
+    # Profiling kappa_F directly is not merely non-standard, it is ill-posed:
+    # the prediction depends on ln^2(kappa_F), so the response is EVEN in the
+    # nuisance (measured |even| 62.9 sigma vs |odd| 17.7 sigma on the Z,
+    # 260911-basin-nuisance-shapes) and a symmetric Gaussian prior then has two
+    # mirror minima. That is the alpha_s bimodality of 2026-09-10/11.
+    #
+    # NB this list is the ONLY route: the registry is a property of the CACHE
+    # (``core.param_names`` -> ``gradient_param_names()``), so these names
+    # cannot be removed from it here -- they can only be kept out of the fitted
+    # subset, which is what DEFAULT_FROZEN does.
+    "resumScaleMuR",
+    "resumScaleMuF",
+)
+
+# --- Frozen gen-level envelope nuisances -------------------------------------
+#
+# Not SCETlib parameters: two extra rabbit-facing POUs the param model appends
+# after the SCETlib block, carrying the symmetrized 7-point (mu_R, mu_F)
+# envelope as a frozen per-gen-bin template (scale_envelope.py). They are unit
+# nuisances -- |theta| = 1 IS the symmetrized envelope -- so they need no
+# REPARAM entry and take the default sigma = 1 from prior_sigma().
+SCALE_ENVELOPE_STEM = "resumFOScaleEnv"
+SCALE_ENVELOPE_NAMES = (
+    SCALE_ENVELOPE_STEM + "SymAvg",
+    SCALE_ENVELOPE_STEM + "SymDiff",
 )
 
 # resumTransition2 was frozen here from 2026-08-21 to 2026-08-25 because the
@@ -397,7 +438,16 @@ IMPACT_GROUP_MEMBERS = {
     ),
     # Named to line up with the card groups they replace, so a grouped-impact
     # bar stays comparable between the template and model treatments.
-    "resumScale": ("resumScaleMuR", "resumScaleMuF"),
+    # One label, both treatments: membership is intersected with the parameters
+    # actually registered, so a fit carrying the frozen envelope reports the two
+    # SymAvg/SymDiff nuisances here and a fit profiling the scales directly
+    # reports those, and a grouped-impact bar stays comparable across the swap.
+    "resumScale": (
+        "resumScaleMuR",
+        "resumScaleMuF",
+        SCALE_ENVELOPE_NAMES[0],
+        SCALE_ENVELOPE_NAMES[1],
+    ),
     "resumTransition": (
         "resumTransition1",
         "resumTransition2",
@@ -694,6 +744,49 @@ def uncovered_params(rabbit_names):
         for n in rabbit_names
         if corr_anchor_key(n) is None and structural_central(n) is None
     )
+
+
+# Parameters the cache FREEZES, as opposed to merely starting from. A cache is
+# built at one point in the full parameter space, but that point does not mean
+# the same thing for every parameter, and the difference decides whether a
+# theory correction may be produced at a value other than the build point.
+# The NP model's own parameters, taken from the map above rather than relisted:
+# every SCETlib name in the np_eff_ / np_gnu_ families, under its rabbit name.
+_NP_RABBIT_NAMES = frozenset(
+    rabbit
+    for scetlib, rabbit in EXPLICIT_NAMES.items()
+    if scetlib.startswith(("np_eff_", "np_gnu_"))
+)
+
+
+def tape_served(rabbit):
+    """May a theory correction be produced at a value other than the build point?
+
+    A cache is built at one point, but that point does not mean the same thing
+    for every parameter. For the nonperturbative model and the TNP values it is
+    only a starting point: they ride the clad AD tape, so evaluating elsewhere
+    is a real evaluation of the real prediction rather than an interpolation
+    between stored ones. That is what makes a correction built at a different
+    tune exact, and it is why those keys are WARN rather than REFUSE in
+    :func:`compare_corr_config`.
+
+    Everything else answers False, and deliberately so rather than because each
+    one has been shown not to qualify. ``alphaS`` and ``pdfEig*`` genuinely do
+    not -- they are served by built PDF members and are exact only at the
+    members that exist -- while the profile scales and the transition points sit
+    on a line that has been moving (``scale_kappa_F`` was a member pair and is
+    now on the tape through the muF polynomial; see EXPLICIT_NAMES). This
+    predicate gates one thing, whether the cache-to-correction writer will move
+    a parameter, and for that a conservative answer costs nothing while a wrong
+    permissive one is silent: a correction whose recorded anchor is not the
+    point it was computed at looks perfect in every prefit check.
+
+    This is the ONLY definition of the distinction. A caller wanting "which
+    parameters may be overridden" derives it from here and
+    :func:`corr_anchor_key` -- the second condition being that the value has
+    somewhere in the runcard to be RECORDED -- rather than keeping its own list.
+    """
+    return rabbit in _NP_RABBIT_NAMES or rabbit.startswith(TNP_PREFIX_OUT)
 
 
 def corr_anchor_value(config, rabbit):
