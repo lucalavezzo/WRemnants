@@ -88,6 +88,11 @@ class Datagroups(object):
         # with option --select in setupRabbit.py or --presel in makeDataMCStackPlot.py,
         # which slice and remove the axis
         self.histAxesRemovedBeforeFakes = []
+        # axes for which under-/overflow bins are turned into explicit bins right
+        # after reading, see 'hh.flowToExplicitBins'. Needed for histograms from
+        # older histmakers, which stored the open ended ABCD regions in the overflow
+        # bin instead of an explicit last bin, since flow bins can not be used in the fit
+        self.flowToExplicitBinsAxes = []
 
         self.setGenAxes()
 
@@ -315,7 +320,10 @@ class Datagroups(object):
             if len(members) == 0:
                 raise RuntimeError(f"No member found for group {g}")
             base_member = members[0].name
-            h = self.results[base_member]["output"][histToRead].get()
+            h = hh.flowToExplicitBins(
+                self.results[base_member]["output"][histToRead].get(),
+                self.flowToExplicitBinsAxes,
+            )
             if forceGlobalScaleFakes is not None:
                 scale = forceGlobalScaleFakes
             else:
@@ -367,7 +375,10 @@ class Datagroups(object):
             if len(members) == 0:
                 raise RuntimeError(f"No member found for group {g}")
             base_member = members[0].name
-            h = self.results[base_member]["output"][histToRead].get()
+            h = hh.flowToExplicitBins(
+                self.results[base_member]["output"][histToRead].get(),
+                self.flowToExplicitBinsAxes,
+            )
             if g in fake_processes and mode.lower() != "mc":
                 self.groups[g].histselector = fakeselector(
                     h,
@@ -398,7 +409,10 @@ class Datagroups(object):
                             "Histogram 'unweighted' not found, continue without fake correction"
                         )
                         return
-                    hQCD = self.results[histname_qcd_mc]["output"]["unweighted"].get()
+                    hQCD = hh.flowToExplicitBins(
+                        self.results[histname_qcd_mc]["output"]["unweighted"].get(),
+                        self.flowToExplicitBinsAxes,
+                    )
                     self.groups[g].histselector.set_correction(hQCD, axes_names=mcCorr)
             else:
                 self.groups[g].histselector = signalselector(
@@ -1154,7 +1168,7 @@ class Datagroups(object):
         if isinstance(h, wums.ioutils.H5PickleProxy):
             h = h.get()
 
-        return h
+        return hh.flowToExplicitBins(h, self.flowToExplicitBinsAxes)
 
     def addProcessGroup(self, name, startsWith=[], excludeMatch=[]):
         procFilter = lambda x: (

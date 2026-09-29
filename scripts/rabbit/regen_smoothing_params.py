@@ -7,6 +7,12 @@ power-series basis.  The output can be loaded as initial parameter values in a
 rabbit fit via ``params:PATH`` in the ``--paramModel SmoothExtendedABCDIsoMT``
 CLI token.
 
+This is usually not needed: setupRabbit.py computes the same coefficients and
+stores them as auxiliary data in the fit input file (see --noSmoothingParams),
+where the param model picks them up by itself.  Use this script to derive the
+starting values from a different input file than the one that is fit, or to
+inspect them standalone.
+
 Typical use::
 
     python scripts/rabbit/regen_smoothing_params.py \\
@@ -20,7 +26,10 @@ import h5py
 import numpy as np
 
 from wremnants.postprocessing.datagroups.datagroups import Datagroups
-from wremnants.postprocessing.histselections import FakeSelectorSimpleABCD
+from wremnants.postprocessing.histselections import (
+    FakeSelectorSimpleABCD,
+    compute_extended_abcd_initial_params,
+)
 from wremnants.postprocessing.regression import Regressor
 from wremnants.utilities import common, parsing
 from wums import ioutils, logging, output_tools
@@ -91,6 +100,18 @@ def make_parser():
         help="Rescale equivalent luminosity by this value (must match the value used in setupRabbit).",
     )
     parser.add_argument(
+        "--flowToExplicitBins",
+        type=str,
+        nargs="*",
+        default=["mt", "relIso", "iso"],
+        help="""
+        Axes for which under-/overflow bins are converted into explicit bins with an infinite outer edge,
+        must match the value used in setupRabbit. Needed for histograms from older histmakers, where the
+        open ended ABCD regions were stored in the overflow bin, instead of an explicit last bin.
+        Axes that are not in the histogram, or that have no flow bins, are ignored. Pass no argument to disable.
+        """,
+    )
+    parser.add_argument(
         "--excludeProcGroups",
         type=str,
         nargs="*",
@@ -112,107 +133,18 @@ def dump_smoothing_params(
 ):
     """
     Dump the per-region Chebyshev polynomial coefficients of the nominal fake
-    histogram smoothing fit, in the layout expected by SmoothExtendedABCD as
-    ``initial_params``.
+    histogram smoothing fit to a standalone file, in the layout expected by
+    SmoothExtendedABCD as ``initial_params``.
 
-    Both the WRemnants spectrum regressor and SmoothExtendedABCD now use the
-    same Chebyshev basis (T_k of the first kind, with x̃ ∈ [-1, 1] via the
-    axis edges), so the regressor coefficients are passed through directly,
-    with a projection of ``log(bin_width)`` added so the exported coefficients
-    predict yields per bin, not rates per unit of the smoothing axis (the
-    regressor fits ``log(data_rate) = log(data_yield / bin_width)``). In the
-    simultaneous (extended)ABCD fit the nonprompt process is filled with
-    ``OnesSelector``, so ``mc_template = 1`` and the polynomial must carry the
-    full absolute scale; the Chebyshev intercept (T_0) is therefore kept.
-
-    The saved array has shape (5 * n_outer * (order+1),) with the layout
-    [A_params, B_params, C_params, Ax_params, Bx_params].
-
-    Flat ABCD index ordering for the 5 regions with signal_region=False
-    (FakeSelector1DExtendedABCD, with flow=True, after y-axis flip so tight iso is last):
-        0=Ax (low mt, fail iso), 1=Bx (low mt, pass iso),
-        2=A  (mid mt, fail iso), 3=B  (mid mt, pass iso),
-                                 4=C  (signal mt, fail iso)  ← application region, rabbit's free parameter
-    Note: signal_region=False drops flat index 5 = D (signal mt, pass iso = signal
-    region), which is rabbit's predicted region.
-
-    Histselections ↔ SmoothExtendedABCD model name mapping:
-        histsel "application region" (signal mt + fail iso) = C_model (free)
-        histsel "signal region"      (signal mt + pass iso) = D_model (predicted)
-
-    Mapping to model order [A=0, B=1, C=2, Ax=3, Bx=4]:
-        model_A  ← sideband flat 2
-        model_B  ← sideband flat 3
-        model_C  ← sideband flat 4
-        model_Ax ← sideband flat 0
-        model_Bx ← sideband flat 1
+    The coefficients are computed by
+    ``histselections.compute_extended_abcd_initial_params``, which is also used by
+    setupRabbit.py to store them directly in the fit input file. See there for
+    the details of the layout and the region ordering.
     """
-    g = datagroups.fakeName
-    # Build the combined fake histogram (data - prompt MC) the same way the normal
-    # histogram loading does, but without applying the histselector.
-    datagroups.loadHistsForDatagroups(
-        inputBaseName, syst="", procsToRead=[g], label="_dump_tmp", applySelection=False
+    datasets = compute_extended_abcd_initial_params(
+        fakeselector, datagroups, inputBaseName
     )
-    h_fakes = datagroups.groups[g].hists["_dump_tmp"]
 
-    # Single call with signal_region=False: returns 5 regions [Ax=0, Bx=1, A=2, B=3, C=4]
-    # The dropped 6th flat element (D = signal mt + pass iso) is the predicted region.
-    fakeselector.calculate_fullABCD_smoothed(h_fakes, signal_region=False)
-    if not hasattr(fakeselector, "_params_before_reduce"):
-        raise RuntimeError(
-            "dump_smoothing_params: _params_before_reduce not found on fakeselector. "
-            "Ensure fakeSmoothingMode='full' is used."
-        )
-    # Shape: (*outer_dims, 5, order+1) — indices [Ax=0, Bx=1, A=2, B=3, C=4]
-    params_5d = fakeselector._params_before_reduce.copy()
-
-    reg = fakeselector.spectrum_regressor
-    order = reg.order
-
-    # Flatten outer dims → (n_outer_flat, n_abcd, order+1)
-    outer_shape = params_5d.shape[:-2]
-    n_outer_flat = int(np.prod(outer_shape))
-    params_5d_flat = params_5d.reshape(n_outer_flat, 5, order + 1)
-
-    # Assemble the 5 model regions in model order [A, B, C, Ax, Bx]
-    # A ← flat 2, B ← flat 3, C ← flat 4, Ax ← flat 0, Bx ← flat 1
-    params_model = np.stack(
-        [
-            params_5d_flat[:, 2, :],  # A  (mid mt, fail iso)
-            params_5d_flat[:, 3, :],  # B  (mid mt, pass iso)
-            params_5d_flat[:, 4, :],  # C  (signal mt, fail iso) = application region
-            params_5d_flat[:, 0, :],  # Ax (low mt, fail iso)
-            params_5d_flat[:, 1, :],  # Bx (low mt, pass iso)
-        ],
-        axis=1,
-    )  # (n_outer, 5, order+1)
-
-    # Both bases now agree (Chebyshev T_k, x̃ ∈ [-1, 1] via the axis edges).
-    # The regressor fits log(data_rate) = log(data_yield / bin_width); the model
-    # evaluates yield = exp(poly) * mc. With mc = 1 (OnesSelector in the
-    # simultaneous ABCD fit) the target coefficients are those of
-    # log(data_yield) = log_rate + log(bin_width). The log(bin_width)
-    # contribution is projected onto the Chebyshev basis and added.
-    smooth_ax = h_fakes.axes[fakeselector.smoothing_axis_name]
-    bin_widths = np.array(smooth_ax.widths)
-    x_cheby = reg.transform_x(np.array(smooth_ax.centers))
-    n_smooth = len(x_cheby)
-
-    T = np.zeros((n_smooth, order + 1))
-    T[:, 0] = 1.0
-    if order >= 1:
-        T[:, 1] = x_cheby
-    for k in range(2, order + 1):
-        T[:, k] = 2.0 * x_cheby * T[:, k - 1] - T[:, k - 2]
-
-    # Chebyshev coefficients of log(bin_width) on the smoothing grid, shape (order+1,)
-    log_bw_coeffs = np.linalg.lstsq(T, np.log(bin_widths), rcond=None)[0]
-
-    q_model = params_model + log_bw_coeffs[np.newaxis, np.newaxis, :]
-
-    # Flatten to model's layout [A_block, B_block, C_block, Ax_block, Bx_block]
-    # Each block: n_outer × (order+1) in C-order
-    params_out = q_model.transpose(1, 0, 2).reshape(-1)  # (5 * n_outer * (order+1),)
     if outpath and not os.path.isdir(outpath):
         os.makedirs(outpath)
 
@@ -223,21 +155,20 @@ def dump_smoothing_params(
     outfile += ".hdf5"
 
     with h5py.File(outfile, mode="w") as f:
-        f.create_dataset("params", data=params_out)
-        f.create_dataset("order", data=np.array(order))
+        f.create_dataset("params", data=datasets["params"])
+        f.create_dataset("order", data=datasets["order"])
         f.create_dataset(
             "smoothing_axis_name",
-            data=np.array(fakeselector.smoothing_axis_name, dtype=h5py.string_dtype()),
+            data=np.array(
+                datasets["smoothing_axis_name"][0], dtype=h5py.string_dtype()
+            ),
         )
-        f.create_dataset("n_outer", data=np.array(n_outer_flat))
-        f.create_dataset("outer_shape", data=np.array(outer_shape, dtype="int64"))
+        f.create_dataset("n_outer", data=datasets["n_outer"])
+        f.create_dataset("outer_shape", data=datasets["outer_shape"])
         if meta_data_dict is not None:
             ioutils.pickle_dump_h5py("meta", meta_data_dict, f)
 
-    logger.info(
-        f"Saved smoothing initial params to {outfile}  "
-        f"(shape {params_out.shape}, n_outer={n_outer_flat}, n_abcd=5, order={order})"
-    )
+    logger.info(f"Saved smoothing initial params to {outfile}")
 
 
 def main():
@@ -253,6 +184,9 @@ def main():
 
     dg.lumiScale = args.lumiScale
     dg.fakerate_axes = args.fakerateAxes
+    # older histmakers stored the open ended ABCD regions in the overflow bins,
+    # turn them into explicit bins with an infinite outer edge, as done in setupRabbit
+    dg.flowToExplicitBinsAxes = args.flowToExplicitBins or []
     dg.set_histselectors(
         dg.getNames(),
         args.inputBaseName,

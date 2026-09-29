@@ -17,6 +17,7 @@ from wremnants.production import (
     generator_level_definitions,
     muon_calibration,
     muon_efficiencies_binned,
+    muon_efficiencies_cvh,
     muon_efficiencies_newVeto,
     muon_efficiencies_smooth,
     muon_efficiencies_veto,
@@ -27,6 +28,7 @@ from wremnants.production import (
     systematics,
     theory_corrections,
     theoryAgnostic_tools,
+    top_corrections,
     unfolding_tools,
     vertex,
 )
@@ -157,6 +159,12 @@ parser.add_argument(
     "--muRmuFPolVar",
     action="store_true",
     help="Store additional histograms using polynomial variations for muR and muF (standard binned variations are still produced).",
+)
+parser.add_argument(
+    "--recoilQtMax",
+    type=float,
+    default=None,
+    help="Evaluate the recoil calibration at min(ptV, RECOILQTMAX): the calibration is derived from Z events and has no statistics above ~150 GeV, where the model extrapolates. The uncapped calibration is stored as a systematic variation (nominal_recoilQtExtrap)",
 )
 
 args = parser.parse_args()
@@ -616,6 +624,7 @@ diff_weights_helper = (
     scale_e=args.scale_e,
     scale_M=args.scale_M,
     make_uncertainty_helper=True,
+    smearing=not args.noSmearing,
 )
 
 z_non_closure_parametrized_helper, z_non_closure_binned_helper = (
@@ -629,17 +638,29 @@ mc_calibration_helper, data_calibration_helper, calibration_uncertainty_helper =
 )
 
 closure_unc_helper = muon_calibration.make_closure_uncertainty_helper(
-    common.closure_filepaths["parametrized"]
+    common.closure_filepaths["parametrized"],
+    scale_var_method=args.muonScaleVariation,
+    smearing=not args.noSmearing,
 )
 closure_unc_helper_A = muon_calibration.make_uniform_closure_uncertainty_helper(
-    0, common.correlated_variation_base_size["A"]
+    0,
+    common.correlated_variation_base_size["A"],
+    scale_var_method=args.muonScaleVariation,
+    smearing=not args.noSmearing,
 )
 closure_unc_helper_M = muon_calibration.make_uniform_closure_uncertainty_helper(
-    2, common.correlated_variation_base_size["M"]
+    2,
+    common.correlated_variation_base_size["M"],
+    scale_var_method=args.muonScaleVariation,
+    smearing=not args.noSmearing,
 )
 
 smearing_helper, smearing_uncertainty_helper = (
-    (None, None) if args.noSmearing else muon_calibration.make_muon_smearing_helpers()
+    (None, None)
+    if args.noSmearing
+    else muon_calibration.make_muon_smearing_helpers(
+        scale_var_method=args.muonScaleVariation,
+    )
 )
 
 bias_helper = (
@@ -702,7 +723,9 @@ if args.muRmuFPolVar:
 if not args.noRecoil:
     from wremnants.production import recoil_tools
 
-    recoilHelper = recoil_tools.Recoil("highPU", args, flavor="mu")
+    recoilHelper = recoil_tools.Recoil(
+        "highPU", args, flavor="mu", qt_max=args.recoilQtMax
+    )
 
 seed_data = 2 * args.randomSeedForToys
 seed_mc = 2 * args.randomSeedForToys + 1
@@ -998,15 +1021,35 @@ def build_graph(df, dataset):
         df, cvh_helper, jpsi_helper, args, dataset, smearing_helper, bias_helper
     )
 
+    if args.cvhBadModules == "veto":
+        # CVH refit efficiency holes (badly aligned modules, incl. TIB-L2 detId
+        # 369141860): remove the affected (eta,phi') rectangles from data and MC
+        # alike, so the data-only refit inefficiency needs no correction.
+        df = muon_efficiencies_cvh.apply_bad_module_veto(
+            df, ptCut=args.vetoRecoPt, etaCut=args.vetoRecoEta
+        )
+
+    # simulate the dimuon events that leak into the single-muon selection in
+    # data because the second muon's CVH refit failed. The veto muon it declares
+    # lost has to be gone before the 'exactly one veto muon' requirement and
+    # before select_good_muons, which builds on the veto collection, so the
+    # filter is deferred by one step here. MC only: in data the muon really is
+    # missing from vetoMuons already. See muon_efficiencies_cvh.hpp
+    cvhVetoLeak = args.cvhBadModules == "sf" and not dataset.is_data
+
     df = muon_selections.select_veto_muons(
         df,
-        nMuons=1,
+        nMuons=-1 if cvhVetoLeak else 1,
         ptCut=args.vetoRecoPt,
         etaCut=args.vetoRecoEta,
         staPtCut=args.vetoRecoStaPt,
         dxybsCut=args.dxybsVeto if args.dxybsVeto > 0 else args.dxybs,
         useGlobalOrTrackerVeto=useGlobalOrTrackerVeto,
     )
+    if cvhVetoLeak:
+        df, _ = muon_efficiencies_cvh.define_cvh_veto_leak(df)
+        df = df.Filter("Sum(vetoMuons) == 1", "oneVetoMuonAfterCvhLeak")
+
     df = muon_selections.select_good_muons(
         df,
         template_minpt,
@@ -1143,9 +1186,26 @@ def build_graph(df, dataset):
                 "wrem::unmatched_postfsrMuon_var(GenPart_eta[postfsrMuons_inAcc], GenPart_pt[postfsrMuons_inAcc], hasMatchDR2idx)",
             )
             df = df.Define(
-                f"vetoMuons_tnpCharge0",
+                f"vetoMuons_tnpCharge0_preCvhLeak",
                 "wrem::unmatched_postfsrMuon_var(GenPart_charge, GenPart_pt[postfsrMuons_inAcc], hasMatchDR2idx)",
             )
+            if cvhVetoLeak:
+                # in a leaking event the second gen muon *was* reconstructed and
+                # did pass the veto; it is only missing from vetoMuons because we
+                # declared its refit failed. The (anti-)veto SF corrects the
+                # probability of not reconstructing it, which is not what
+                # happened here, so it must not be applied -- nor the DY veto
+                # fraction scaling, which addresses the same population. Flagging
+                # the event as having no unmatched gen muon switches off both,
+                # and their systematic variations with them.
+                df = df.Define(
+                    f"vetoMuons_tnpCharge0",
+                    "cvhVetoLeak_index >= 0 ? -99 : vetoMuons_tnpCharge0_preCvhLeak",
+                )
+            else:
+                df = df.Alias(
+                    f"vetoMuons_tnpCharge0", f"vetoMuons_tnpCharge0_preCvhLeak"
+                )
     if isQCDMC:
         df = generator_level_definitions.define_postfsr_vars(df)
         df = df.Filter(
@@ -1238,6 +1298,15 @@ def build_graph(df, dataset):
         if not args.noVertexWeight:
             weight_expr += "*weight_vtx"
 
+        if cvhVetoLeak:
+            # probability of the branch kept by define_cvh_veto_leak above: 1 for
+            # the ordinary events, 1 - SF_cvh for the dimuon ones that leak into
+            # this selection. Not gated on --noScaleFactors, unlike weight_cvhSF
+            # below: the events were let through the veto on the strength of this
+            # weight, so dropping it would leave them here at full weight. The
+            # survival factor of the muon that is kept comes from weight_cvhSF.
+            weight_expr += "*weight_cvhVetoLeak"
+
         # for tests to split into number of reconstructed vertices
         if args.addNvtxAxis is not None and args.normWeightNvtx is not None:
             df = define_norm_weight_nRecoVtx(df, args.addNvtxAxis, args.normWeightNvtx)
@@ -1290,6 +1359,24 @@ def build_graph(df, dataset):
             )
             weight_expr += "*weight_fullMuonSF_withTrackingReco"
 
+            if args.cvhBadModules == "sf":
+                # alternative to the geometric veto applied above: downweight MC
+                # in the affected (eta,phi') cells by the measured data/MC
+                # efficiency ratio. See muon_efficiencies_cvh.hpp; charge/pt undo
+                # the track bending. Single W muon.
+                df, _ = muon_efficiencies_cvh.define_cvh_weight(
+                    df,
+                    [
+                        (
+                            "goodMuons_eta0",
+                            "goodMuons_phi0",
+                            "goodMuons_charge0",
+                            "goodMuons_pt0",
+                        )
+                    ],
+                )
+                weight_expr += "*weight_cvhSF"
+
             if isZ and not args.noGenMatchMC:
                 if args.scaleDYvetoFraction > 0.0:
                     # weight different from 1 only for events with >=2 gen muons in acceptance but only 1 reco muon
@@ -1341,6 +1428,11 @@ def build_graph(df, dataset):
                 pixel_multiplicity_cols,
             )
             weight_expr += "*weight_pixel_multiplicity"
+
+        if isTop:
+            # NNLO QCD + NLO EW over POWHEG+Pythia8, applied to the ttbar samples
+            df = top_corrections.define_top_pt_weight(df, dataset.name)
+            weight_expr += "*topPtWeight"
 
         logger.debug(f"Exp weight defined: {weight_expr}")
         df = df.Define("exp_weight", weight_expr)
@@ -1413,6 +1505,17 @@ def build_graph(df, dataset):
         "transverseMass",
         "wrem::mt_2(goodMuons_pt0, goodMuons_phi0, MET_corr_rec_pt, MET_corr_rec_phi)",
     )
+
+    if not args.noRecoil and args.recoilQtMax is not None:
+        # recoil calibration evaluated at the uncapped boson pt, see recoil_tools.py
+        df = df.Define(
+            "transverseMass_recoilQtExtrap",
+            "wrem::mt_2(goodMuons_pt0, goodMuons_phi0, MET_corr_rec_qtExtrap_pt, MET_corr_rec_qtExtrap_phi)",
+        )
+        df = df.Define(
+            "goodMuons_angleSignUt_recoilQtExtrap0",
+            "wrem::zqtproj0_angleSign(goodMuons_pt0, goodMuons_phi0, MET_corr_rec_qtExtrap_pt, MET_corr_rec_qtExtrap_phi)",
+        )
 
     # Define dedicated systematics from scaling/smearing met_pt and smearing met_phi.
     # The used values are derived looking at template variations, but not optimized.
@@ -2209,6 +2312,36 @@ def build_graph(df, dataset):
             [*cols_smearMET_phi, "nominal_weight"],
         )
 
+        if isTop:
+            # the size of the top pt reweighting itself is taken as its uncertainty
+            df = df.Define("nominal_weight_noTopPt", "nominal_weight/topPtWeight")
+            systematics.add_syst_hist(
+                results,
+                df,
+                "nominal_topPtNNLO",
+                axes,
+                [*cols, "nominal_weight_noTopPt"],
+            )
+
+        if (
+            not args.noRecoil
+            and args.recoilQtMax is not None
+            and dataset.name in samples.wprocs_recoil
+        ):
+            cols_recoilQtExtrap = [
+                x.replace("transverseMass", "transverseMass_recoilQtExtrap").replace(
+                    "goodMuons_angleSignUt0", "goodMuons_angleSignUt_recoilQtExtrap0"
+                )
+                for x in cols
+            ]
+            systematics.add_syst_hist(
+                results,
+                df,
+                "nominal_recoilQtExtrap",
+                axes,
+                [*cols_recoilQtExtrap, "nominal_weight"],
+            )
+
         if args.makeMCefficiency:
             axes_WeffMC = [
                 axis_eta,
@@ -2487,11 +2620,20 @@ def build_graph(df, dataset):
                     )
                     results.append(hist_pixelMultiplicityStat)
 
-                # extra uncertainties from non-closure stats
+                # extra uncertainties from non-closure stats. Use
+                # ``jpsi_style_cols`` so each closure helper sees the
+                # right column list -- 10 (incl. φ + muon_source) for
+                # the ONNX reweight helpers, 7 (incl. response_weight)
+                # for the analytic Splines helpers.
+                response_weight_col = f"{reco_sel_GF}_response_weight"
+
+                df, _cl_cols = muon_calibration.jpsi_style_cols(
+                    df, closure_unc_helper, reco_sel_GF, response_weight_col
+                )
                 df = df.Define(
                     "muonScaleClosSyst_responseWeights_tensor_splines",
                     closure_unc_helper,
-                    [*input_kinematics, "nominal_weight"],
+                    [*_cl_cols, "nominal_weight"],
                 )
                 nominal_muonScaleClosSyst_responseWeights = df.HistoBoost(
                     "nominal_muonScaleClosSyst_responseWeights",
@@ -2503,10 +2645,13 @@ def build_graph(df, dataset):
                 results.append(nominal_muonScaleClosSyst_responseWeights)
 
                 # extra uncertainties for A (fully correlated)
+                df, _cl_cols_A = muon_calibration.jpsi_style_cols(
+                    df, closure_unc_helper_A, reco_sel_GF, response_weight_col
+                )
                 df = df.Define(
                     "muonScaleClosASyst_responseWeights_tensor_splines",
                     closure_unc_helper_A,
-                    [*input_kinematics, "nominal_weight"],
+                    [*_cl_cols_A, "nominal_weight"],
                 )
                 nominal_muonScaleClosASyst_responseWeights = df.HistoBoost(
                     "nominal_muonScaleClosASyst_responseWeights",
@@ -2518,10 +2663,13 @@ def build_graph(df, dataset):
                 results.append(nominal_muonScaleClosASyst_responseWeights)
 
                 # extra uncertainties for M (fully correlated)
+                df, _cl_cols_M = muon_calibration.jpsi_style_cols(
+                    df, closure_unc_helper_M, reco_sel_GF, response_weight_col
+                )
                 df = df.Define(
                     "muonScaleClosMSyst_responseWeights_tensor_splines",
                     closure_unc_helper_M,
-                    [*input_kinematics, "nominal_weight"],
+                    [*_cl_cols_M, "nominal_weight"],
                 )
                 nominal_muonScaleClosMSyst_responseWeights = df.HistoBoost(
                     "nominal_muonScaleClosMSyst_responseWeights",

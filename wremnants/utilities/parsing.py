@@ -227,6 +227,11 @@ def common_parser(analysis_label=""):
         help="Run the recoil calibration with uncertainties (slower)",
     )
     parser.add_argument(
+        "--recoilGenProxy",
+        action="store_true",
+        help="In the Z analyses, apply the recoil calibration along the gen boson proxy (gen non-triggering lepton + reco triggering lepton), as done for the W, instead of the reconstructed dilepton. For closure tests of the W application",
+    )
+    parser.add_argument(
         "--highptscales",
         action="store_true",
         help="Apply highptscales option in MiNNLO for better description of data at high pT",
@@ -424,8 +429,13 @@ def common_parser(analysis_label=""):
         )
         parser.add_argument(
             "--muonScaleVariation",
-            choices=["smearingWeightsGaus", "smearingWeightsSplines", "massWeights"],
-            default="smearingWeightsSplines",
+            choices=[
+                "smearingWeightsGaus",
+                "smearingWeightsSplines",
+                "massWeights",
+                "onnxReweight",
+            ],
+            default="onnxReweight",
             help="method to generate nominal muon scale variation histograms",
         )
         parser.add_argument(
@@ -508,6 +518,17 @@ def common_parser(analysis_label=""):
             "--pixelMultiplicityStat",
             action="store_true",
             help="Include (very small) statistical uncertainties for pixel multiplicity variation",
+        )
+        parser.add_argument(
+            "--cvhBadModules",
+            choices=["veto", "sf", "none"],
+            default="sf",
+            help="""Treatment of the CVH refit efficiency holes of the badly aligned modules
+            (see muon_efficiencies_cvh.hpp). 'veto' drops events with a muon crossing
+            one of them, in data and MC alike; 'sf' instead downweights MC by the measured
+            data/MC efficiency ratio, and simulates the dimuon events that leak into the
+            single-muon selection when the second muon's refit fails by letting them
+            through the veto with weight 1 - SF; 'none' does nothing.""",
         )
         parser.add_argument(
             "--vetoRecoPt",

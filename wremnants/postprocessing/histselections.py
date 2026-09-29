@@ -2228,3 +2228,185 @@ class FakeSelector2DExtendedABCD(FakeSelector1DExtendedABCD):
             dvar = c_scf**2 * frf_var + frf**2 * c_scf_var
 
         return d, dvar
+
+
+def is_simultaneous_abcd_fit(fitvar):
+    """Whether the extended ABCD regions are part of the fit rather than collapsed here.
+
+    With mt and relIso among the fit axes the ABCD relation is solved by rabbit's
+    param model, which is what makes the 'none' fake estimation and the stored
+    initial parameters the right defaults.
+    """
+    return "mt" in fitvar and "relIso" in fitvar
+
+
+def default_fake_estimation(args):
+    """Resolve --fakeEstimation when it was not given explicitly.
+
+    For the simultaneous ABCD fit the fakes have to be filled with a flat template so
+    that rabbit solves the ABCD relation itself, so 'none' is the only choice that
+    makes sense there; everywhere else the historical 'extended1D' still applies.
+    Resolved once from all channels, since the option is global.
+    """
+    if args.fakeEstimation is not None:
+        return args.fakeEstimation
+    if all(is_simultaneous_abcd_fit(fv.split("-")) for fv in args.fitvar):
+        return "none"
+    return "extended1D"
+
+
+def should_store_smoothing_params(args, fitvar):
+    """Whether to store initial parameters for the simultaneous ABCD param model.
+
+    Stored whenever they are needed, i.e. whenever the ABCD relation is left for the
+    fit to solve: the two ABCD axes are fit axes and the fakes are filled with a flat
+    template ('none' fake estimation, which is also the default in that case).
+    --noSmoothingParams opts out.
+    """
+    return (
+        not args.noSmoothingParams
+        and args.fakeEstimation in ["none", None]
+        and is_simultaneous_abcd_fit(fitvar)
+    )
+
+
+def compute_extended_abcd_initial_params(
+    fakeselector, datagroups, inputBaseName, label="_smoothing_params"
+):
+    """
+    Compute the per-region polynomial coefficients of the nominal fake histogram
+    smoothing fit, in the layout expected by SmoothExtendedABCD as ``initial_params``.
+
+    This is **not** a generic smoothing utility. It is a translation between two
+    specific implementations of one specific nonprompt estimate, and it hard-codes
+    every one of them:
+
+    * the 6-region 1D extended ABCD of the W mass analysis, i.e. a ``fakeselector``
+      that is a ``FakeSelector1DExtendedABCD`` built with ``smoothing_mode="full"``
+      (it reads the private ``_params_before_reduce``) and ``integrate_x=True``;
+    * exactly 5 free regions plus the predicted one, and the flat index ordering that
+      ``calculate_fullABCD_smoothed(..., signal_region=False)`` returns with the y
+      axis flipped so that tight isolation is last, spelled out below;
+    * a single smoothing axis, and the Chebyshev basis shared by the regressor and
+      the rabbit param model;
+    * ``mc_template = 1``, i.e. the nonprompt process filled with ``OnesSelector``,
+      which is what lets the intercept carry the absolute scale.
+
+    Any other ABCD layout, region count, smoothing mode or basis needs its own
+    translation rather than an argument to this one.
+
+    Both the WRemnants spectrum regressor and SmoothExtendedABCD use the same
+    Chebyshev basis (T_k of the first kind, with x̃ ∈ [-1, 1] via the axis edges),
+    so the regressor coefficients are passed through directly, with a projection of
+    ``log(bin_width)`` added so the exported coefficients predict yields per bin, not
+    rates per unit of the smoothing axis (the regressor fits
+    ``log(data_rate) = log(data_yield / bin_width)``). In the simultaneous
+    (extended)ABCD fit the nonprompt process is filled with ``OnesSelector``, so
+    ``mc_template = 1`` and the polynomial must carry the full absolute scale; the
+    Chebyshev intercept (T_0) is therefore kept.
+
+    The returned 'params' array has shape (5 * n_outer * (order+1),) with the layout
+    [A_params, B_params, C_params, Ax_params, Bx_params].
+
+    Flat ABCD index ordering for the 5 regions with signal_region=False
+    (FakeSelector1DExtendedABCD, with flow=True, after y-axis flip so tight iso is last):
+        0=Ax (low mt, fail iso), 1=Bx (low mt, pass iso),
+        2=A  (mid mt, fail iso), 3=B  (mid mt, pass iso),
+                                 4=C  (signal mt, fail iso)  ← application region, rabbit's free parameter
+    Note: signal_region=False drops flat index 5 = D (signal mt, pass iso = signal
+    region), which is rabbit's predicted region.
+
+    Histselections ↔ SmoothExtendedABCD model name mapping:
+        histsel "application region" (signal mt + fail iso) = C_model (free)
+        histsel "signal region"      (signal mt + pass iso) = D_model (predicted)
+
+    Mapping to model order [A=0, B=1, C=2, Ax=3, Bx=4]:
+        model_A  ← sideband flat 2
+        model_B  ← sideband flat 3
+        model_C  ← sideband flat 4
+        model_Ax ← sideband flat 0
+        model_Bx ← sideband flat 1
+
+    Returns a dict with the keys 'params', 'order', 'smoothing_axis_name', 'n_outer'
+    and 'outer_shape'.
+    """
+    g = datagroups.fakeName
+    # Build the combined fake histogram (data - prompt MC) the same way the normal
+    # histogram loading does, but without applying the histselector.
+    datagroups.loadHistsForDatagroups(
+        inputBaseName, syst="", procsToRead=[g], label=label, applySelection=False
+    )
+    h_fakes = datagroups.groups[g].hists.pop(label)
+
+    # Single call with signal_region=False: returns 5 regions [Ax=0, Bx=1, A=2, B=3, C=4]
+    # The dropped 6th flat element (D = signal mt + pass iso) is the predicted region.
+    fakeselector.calculate_fullABCD_smoothed(h_fakes, signal_region=False)
+    if not hasattr(fakeselector, "_params_before_reduce"):
+        raise RuntimeError(
+            "compute_extended_abcd_initial_params: _params_before_reduce not found on "
+            "the fakeselector. "
+            "Ensure fakeSmoothingMode='full' is used."
+        )
+    # Shape: (*outer_dims, 5, order+1) — indices [Ax=0, Bx=1, A=2, B=3, C=4]
+    params_5d = fakeselector._params_before_reduce.copy()
+
+    reg = fakeselector.spectrum_regressor
+    order = reg.order
+
+    # Flatten outer dims → (n_outer_flat, n_abcd, order+1)
+    outer_shape = params_5d.shape[:-2]
+    n_outer_flat = int(np.prod(outer_shape))
+    params_5d_flat = params_5d.reshape(n_outer_flat, 5, order + 1)
+
+    # Assemble the 5 model regions in model order [A, B, C, Ax, Bx]
+    # A ← flat 2, B ← flat 3, C ← flat 4, Ax ← flat 0, Bx ← flat 1
+    params_model = np.stack(
+        [
+            params_5d_flat[:, 2, :],  # A  (mid mt, fail iso)
+            params_5d_flat[:, 3, :],  # B  (mid mt, pass iso)
+            params_5d_flat[:, 4, :],  # C  (signal mt, fail iso) = application region
+            params_5d_flat[:, 0, :],  # Ax (low mt, fail iso)
+            params_5d_flat[:, 1, :],  # Bx (low mt, pass iso)
+        ],
+        axis=1,
+    )  # (n_outer, 5, order+1)
+
+    # Both bases agree (Chebyshev T_k, x̃ ∈ [-1, 1] via the axis edges).
+    # The regressor fits log(data_rate) = log(data_yield / bin_width); the model
+    # evaluates yield = exp(poly) * mc. With mc = 1 (OnesSelector in the
+    # simultaneous ABCD fit) the target coefficients are those of
+    # log(data_yield) = log_rate + log(bin_width). The log(bin_width)
+    # contribution is projected onto the Chebyshev basis and added.
+    smooth_ax = h_fakes.axes[fakeselector.smoothing_axis_name]
+    bin_widths = np.array(smooth_ax.widths)
+    x_cheby = reg.transform_x(np.array(smooth_ax.centers))
+    n_smooth = len(x_cheby)
+
+    T = np.zeros((n_smooth, order + 1))
+    T[:, 0] = 1.0
+    if order >= 1:
+        T[:, 1] = x_cheby
+    for k in range(2, order + 1):
+        T[:, k] = 2.0 * x_cheby * T[:, k - 1] - T[:, k - 2]
+
+    # Chebyshev coefficients of log(bin_width) on the smoothing grid, shape (order+1,)
+    log_bw_coeffs = np.linalg.lstsq(T, np.log(bin_widths), rcond=None)[0]
+
+    q_model = params_model + log_bw_coeffs[np.newaxis, np.newaxis, :]
+
+    # Flatten to model's layout [A_block, B_block, C_block, Ax_block, Bx_block]
+    # Each block: n_outer × (order+1) in C-order
+    params_out = q_model.transpose(1, 0, 2).reshape(-1)  # (5 * n_outer * (order+1),)
+
+    logger.info(
+        f"Computed smoothing initial params "
+        f"(shape {params_out.shape}, n_outer={n_outer_flat}, n_abcd=5, order={order})"
+    )
+
+    return {
+        "params": params_out,
+        "order": np.array(order),
+        "smoothing_axis_name": [fakeselector.smoothing_axis_name],
+        "n_outer": np.array(n_outer_flat),
+        "outer_shape": np.array(outer_shape, dtype="int64"),
+    }

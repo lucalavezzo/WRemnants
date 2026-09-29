@@ -61,6 +61,10 @@ class TheoryHelper(object):
         "none",
     ]
 
+    # uncertainties that can be taken from the helicity-smoothed (ByHelicity) hists,
+    # see 'set_from_hels'
+    from_hels_sources = ["QCDscale", "pdf", "alphaS", "PDFquarkMass"]
+
     def __init__(self, label, datagroups, args, hasNonsigSamples=False):
         toCheck = ["signal_samples", "signal_samples_inctau", "single_v_samples"]
         if hasNonsigSamples:
@@ -152,11 +156,40 @@ class TheoryHelper(object):
         self.samples = samples
         self.helicity_fit_unc = helicity_fit_unc
         self.minnlo_scale = minnlo_scale
-        self.from_hels = from_hels
+        self.set_from_hels(from_hels)
 
         convert_none = lambda x: x if x.lower() != "none" else None
         self.theory_symmetrize = convert_none(theory_symmetrize)
         self.pdf_symmetrize = convert_none(pdf_symmetrize)
+
+    def set_from_hels(self, from_hels):
+        """Select which uncertainties are taken from the helicity-smoothed (ByHelicity) hists.
+
+        Accepts a bool for all/none, or a collection of source names out of
+        'from_hels_sources'. Older histmaker outputs only have some of the ByHelicity
+        hists (e.g. only qcdScaleByHelicity), so this can be set per source.
+        """
+        if isinstance(from_hels, bool):
+            from_hels = self.from_hels_sources if from_hels else []
+        unknown = [s for s in from_hels if s not in self.from_hels_sources]
+        if unknown:
+            raise ValueError(
+                f"Unknown source(s) {unknown} for helicity-smoothed hists, "
+                f"valid ones are {self.from_hels_sources}"
+            )
+        self.from_hels = set(from_hels)
+        logger.debug(
+            f"Taking these uncertainties from the ByHelicity hists: {sorted(self.from_hels)}"
+        )
+
+    def use_hels(self, source):
+        """Whether the given uncertainty is taken from the ByHelicity hists."""
+        if source not in self.from_hels_sources:
+            raise ValueError(
+                f"Unknown source {source} for helicity-smoothed hists, "
+                f"valid ones are {self.from_hels_sources}"
+            )
+        return source in self.from_hels
 
     def add_all_theory_unc(self):
         self.add_nonpert_unc(model=self.np_model)
@@ -338,7 +371,7 @@ class TheoryHelper(object):
         # from_hels selects the helicity-smoothed scale hist, which carries the
         # muR/muF variations decomposed by helicity (UL + each A_i); otherwise use
         # the raw MiNNLO event-weight grid and vary muR/muF one at a time below.
-        if self.from_hels:
+        if self.use_hels("QCDscale"):
             scale_hist = "qcdScaleByHelicity"
 
             syst_axes = ["vars"]
@@ -422,7 +455,7 @@ class TheoryHelper(object):
             logger.warning(
                 "Without pT or helicity splitting, only the SCETlib uncertainty will be applied!"
             )
-        elif self.from_hels:
+        elif self.use_hels("QCDscale"):
             # FIXME Maybe put W and Z nuisances in the same group
             group_name += f"MiNNLO"
             self.datagroups.addSystematic(
@@ -1054,7 +1087,7 @@ class TheoryHelper(object):
         elif pdfName == "pdfHERAPDF20":
             pdf_hist_ext = pdf_hist.replace("pdfHERAPDF20", "pdfHERAPDF20ext")
 
-        if self.from_hels:
+        if self.use_hels("pdf"):
             pdf_hist += "ByHelicity"
             if pdf_hist_ext is not None:
                 pdf_hist_ext += "ByHelicity"
@@ -1171,7 +1204,11 @@ class TheoryHelper(object):
         else:
             asname = f"{pdfName}alphaS{as_range}"
 
-        if self.as_from_corr and self.from_hels and not asname.endswith("ByHelicity"):
+        if (
+            self.as_from_corr
+            and self.use_hels("alphaS")
+            and not asname.endswith("ByHelicity")
+        ):
             asname += "ByHelicity"
 
         input_variation = int(as_range) * 10 ** (-len(as_range))
@@ -1329,12 +1366,12 @@ class TheoryHelper(object):
             )
 
         if from_minnlo:
-            if self.from_hels:
+            if self.use_hels("PDFquarkMass"):
                 bhist = "pdfMSHT20mbrangeByHelicity"
             else:
                 bhist = "pdfMSHT20mbrange"
         elif has_new_corrs:
-            if self.from_hels:
+            if self.use_hels("PDFquarkMass"):
                 bhist = "scetlib_dyturbo_LatticeNP_MSHT20mbrange_N3p0LL_N2LO_pdfvars_CorrByHelicity"
             else:
                 raise ValueError(

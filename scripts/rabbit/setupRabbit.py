@@ -8,7 +8,7 @@ import hist
 import numpy as np
 
 import rabbit.io_tools
-from rabbit import tensorwriter
+from rabbit import auxiliary, tensorwriter
 from wremnants.postprocessing import (
     rabbit_helpers,
     rabbit_theory_helper,
@@ -16,7 +16,12 @@ from wremnants.postprocessing import (
 )
 from wremnants.postprocessing.datagroups import datagroups
 from wremnants.postprocessing.datagroups.datagroups import Datagroups
-from wremnants.postprocessing.histselections import FakeSelectorSimpleABCD
+from wremnants.postprocessing.histselections import (
+    FakeSelectorSimpleABCD,
+    compute_extended_abcd_initial_params,
+    default_fake_estimation,
+    should_store_smoothing_params,
+)
 from wremnants.postprocessing.regression import Regressor
 from wremnants.postprocessing.scetlib_ad import response_matrix as scetlib_np_response
 from wremnants.postprocessing.syst_tools import (
@@ -625,8 +630,13 @@ def make_parser(parser=None, argv=None):
     parser.add_argument(
         "--fakeEstimation",
         type=str,
-        help="Set the mode for the fake estimation",
-        default="extended1D",
+        help="""
+        Set the mode for the fake estimation. Defaults to 'none' when mt and relIso are
+        fit axes, i.e. for the simultaneous extended ABCD fit, where the ABCD relation
+        is solved by rabbit's param model and the fakes have to be a flat template
+        here; 'extended1D' otherwise.
+        """,
+        default=None,
         choices=[
             "none",
             "mc",
@@ -702,6 +712,31 @@ def make_parser(parser=None, argv=None):
         Edges for ABCD method given an axis. Syntax is --ABCDedgesByAxis 'nameX=x1,x2,x3' 'nameY=y1,y2,y3'
         Values after = are converted into float internally.
         Can specify only one axis or two (potentially more).
+        """,
+    )
+    parser.add_argument(
+        "--noSmoothingParams",
+        action="store_true",
+        help="""
+        Don't store the initial parameters for the SmoothExtendedABCDIsoMT param model of rabbit.
+        By default they are computed and stored as auxiliary data in the output file whenever the
+        fit needs them, i.e. whenever the ABCD relation is solved in the fit itself (mt and relIso
+        fit axes with the 'none' fake estimation, which is the default in that case), so that the
+        fit can start from them without running regen_smoothing_params.py separately.
+        Specific to the 1D extended ABCD nonprompt estimate of the W mass analysis, see
+        histselections.compute_extended_abcd_initial_params.
+        """,
+    )
+    parser.add_argument(
+        "--flowToExplicitBins",
+        type=str,
+        nargs="*",
+        default=["mt", "relIso", "iso"],
+        help="""
+        Fit axes for which under-/overflow bins are converted into explicit bins with an infinite outer edge.
+        Needed for histograms from older histmakers, where the open ended ABCD regions were stored in the overflow bin,
+        instead of an explicit last bin. Flow bins can not be used in the fit, so without this the content would be lost.
+        Axes that are not fit axes, or that have no flow bins, are ignored. Pass no argument to disable.
         """,
     )
     parser.add_argument(
@@ -1196,7 +1231,19 @@ def make_parser(parser=None, argv=None):
         action="store_true",
         help="Don't use theory correction histograms produced via smoothing through helicities. "
         "Affects the PDF, alpha_S, quark-mass and MiNNLO muR/muF uncertainties: with this flag they "
-        "are taken from the raw MiNNLO event weights instead of the helicity-decomposed (ByHelicity) hists.",
+        "are taken from the raw MiNNLO event weights instead of the helicity-decomposed (ByHelicity) hists. "
+        "Shorthand for '--theoryCorrsViaHelicities' with no argument.",
+    )
+    parser.add_argument(
+        "--theoryCorrsViaHelicities",
+        type=str,
+        nargs="*",
+        choices=rabbit_theory_helper.TheoryHelper.from_hels_sources,
+        default=rabbit_theory_helper.TheoryHelper.from_hels_sources,
+        help="Uncertainties to take from the theory correction histograms produced via smoothing "
+        "through helicities (ByHelicity hists), the others are taken from the raw MiNNLO event weights. "
+        "By default all of them are, but older histmaker outputs only have some of the ByHelicity hists, "
+        "e.g. only qcdScaleByHelicity, in which case use '--theoryCorrsViaHelicities QCDscale'.",
     )
     parser.add_argument(
         "--breitwignerWMassWeights",
@@ -1275,6 +1322,17 @@ def setup(
 
     datagroups.fit_axes = fitvar
     datagroups.channel = channel
+
+    # older histmakers stored the open ended ABCD regions in the overflow bins, which
+    # can not be used in the fit, turn them into explicit bins with an infinite outer edge
+    flow_to_explicit_bins_axes = [
+        x for x in (args.flowToExplicitBins or []) if x in fitvar
+    ]
+    if flow_to_explicit_bins_axes:
+        logger.debug(
+            f"Flow bins of fit axes {flow_to_explicit_bins_axes} will be turned into explicit bins (if there are any)"
+        )
+    datagroups.flowToExplicitBinsAxes = flow_to_explicit_bins_axes
     if args.noSymmetrize is None:
         datagroups.force_asymmetric = False
         datagroups.force_asymmetric_patterns = None
@@ -1546,6 +1604,40 @@ def setup(
                 [str(x[0].split(":")[0]) for x in args.presel] if args.presel else []
             ),
         )
+        if should_store_smoothing_params(args, fitvar):
+            # The fakes are filled with a flat template ('none' histselector) and the
+            # ABCD relation is solved in the fit itself. Derive the polynomial
+            # coefficients of the extended ABCD regions here and ship them along with
+            # the templates, so the rabbit param model can start the fit from them.
+            # This needs the corresponding fake selector, the one for the fit is set
+            # again right after. Only for the fake group, the other groups must keep
+            # their full ABCD axes (the 'none' mode doesn't set any selector for them).
+            datagroups.set_histselectors(
+                [datagroups.fakeName],
+                inputBaseName,
+                mode="extended1D",
+                smoothing_mode="full",
+                smoothingOrderSpectrum=args.fakeSmoothingOrder,
+                smoothingPolynomialSpectrum=args.fakeSmoothingPolynomial,
+                mcCorr=None,
+                integrate_x=True,
+                forceGlobalScaleFakes=False,
+                abcdExplicitAxisEdges=abcdExplicitAxisEdges,
+                fakeTransferAxis="",
+                fakeTransferCorrFileName=None,
+                histAxesRemovedBeforeFakes=[],
+            )
+            smoothing_params = compute_extended_abcd_initial_params(
+                datagroups.groups[datagroups.fakeName].histselector,
+                datagroups,
+                inputBaseName,
+            )
+            aux_name = auxiliary.initial_params_name(
+                "SmoothExtendedABCDIsoMT", datagroups.fakeName, channel
+            )
+            logger.info(f"Store initial parameters as auxiliary data '{aux_name}'")
+            writer.add_auxiliary(aux_name, smoothing_params)
+
         datagroups.set_histselectors(
             datagroups.getNames(), inputBaseName, **histselector_kwargs
         )
@@ -1678,6 +1770,19 @@ def setup(
 
     signal_samples_forMass = ["signal_samples_inctau"]
 
+    def groupsWithHist(histname):
+        # groups for which every member has the histogram, so that histmaker outputs
+        # produced before a process (or an option) was added keep working
+        return [
+            g
+            for g in datagroups.procGroups["MCnoQCD"]
+            if len(datagroups.groups[g].members)
+            and all(
+                histname in datagroups.results.get(m.name, {}).get("output", {})
+                for m in datagroups.groups[g].members
+            )
+        ]
+
     datagroups.writer = writer
 
     for pseudodata in args.pseudoDataFakes:
@@ -1687,6 +1792,7 @@ def setup(
                 filterGroups=["QCD"],
             )
             pseudodataGroups.fakerate_axes = args.fakerateAxes
+            pseudodataGroups.flowToExplicitBinsAxes = flow_to_explicit_bins_axes
             pseudodataGroups.copyGroup("QCD", "QCDTruth")
             if pseudodata == "truthMC":
                 pseudodataGroups.deleteGroup("QCD")
@@ -1705,6 +1811,7 @@ def setup(
                 filterGroups=filterGroup,
             )
             pseudodataGroups.fakerate_axes = args.fakerateAxes
+            pseudodataGroups.flowToExplicitBinsAxes = flow_to_explicit_bins_axes
 
         datagroups.addPseudodataHistogramFakes(pseudodata, pseudodataGroups)
 
@@ -1728,6 +1835,7 @@ def setup(
                     excludeGroups=excludeGroup,
                     filterGroups=filterGroup,
                 )
+                pseudodataGroups.flowToExplicitBinsAxes = flow_to_explicit_bins_axes
 
                 if wmass and not datagroups.xnorm:
                     pseudodataGroups.fakerate_axes = args.fakerateAxes
@@ -1981,7 +2089,9 @@ def setup(
             samples=theorySystSamples,
             minnlo_unc=args.minnloScaleUnc,
             minnlo_scale=args.scaleMinnloScale,
-            from_hels=not args.noTheoryCorrsViaHelicities,
+            from_hels=(
+                [] if args.noTheoryCorrsViaHelicities else args.theoryCorrsViaHelicities
+            ),
             theory_symmetrize=args.symmetrizeTheoryUnc,
             pdf_symmetrize=args.symmetrizePdfUnc,
             helicity_fit_unc=args.helicityFitTheoryUnc,
@@ -2238,6 +2348,22 @@ def setup(
                 groups=[f"CMS_background", "experiment", "expNoLumi", "expNoCalib"],
                 passToFakes=passSystToFakes,
                 norm=1.06,
+            )
+        if "Top" in groupsWithHist("nominal_topPtNNLO"):
+            # the top pt reweighting is applied in the histmaker, its size is taken as
+            # the uncertainty (mirrored), as recommended by the TOP PAG
+            datagroups.addSystematic(
+                "topPtNNLO",
+                processes=["Top"],
+                mirror=True,
+                groups=[
+                    "CMS_background",
+                    "experiment",
+                    "expNoLumi",
+                    "expNoCalib",
+                ],
+                systAxes=[],
+                passToFakes=passSystToFakes,
             )
         if "Diboson" in datagroups.groups:
             datagroups.addNormSystematic(
@@ -2935,12 +3061,38 @@ def setup(
                 )
 
     if (wmass or wlike) and datagroups.args_from_metadata("recoilUnc"):
+        # apply the uncertainty to every process the recoil calibration was applied to
+        # (samples.wprocs_recoil / zprocs_recoil), i.e. those with the variations stored
+        recoilSamples = groupsWithHist("nominal_recoil_stat")
+        logger.info(f"Apply the recoil uncertainty to {recoilSamples}")
         rabbit_helpers.add_recoil_uncertainty(
             datagroups,
-            ["signal_samples"],
+            recoilSamples,
             passSystToFakes=passSystToFakes,
             flavor=datagroups.flavor if datagroups.flavor else "mu",
             pu_type="lowPU" if lowPU else "highPU",
+        )
+
+    # calibration evaluated without the cap on the boson pt (histmaker --recoilQtMax),
+    # covering the extrapolation of the calibration beyond the range it was derived in
+    recoilQtExtrapSamples = groupsWithHist("nominal_recoilQtExtrap")
+    if len(recoilQtExtrapSamples):
+        logger.info(
+            f"Apply the recoil qt extrapolation uncertainty to {recoilQtExtrapSamples}"
+        )
+        datagroups.addSystematic(
+            "recoilQtExtrap",
+            mirror=True,
+            processes=recoilQtExtrapSamples,
+            groups=[
+                "recoil_qtExtrap",
+                "recoil",
+                "experiment",
+                "expNoLumi",
+                "expNoCalib",
+            ],
+            systAxes=[],
+            passToFakes=passSystToFakes,
         )
 
     if lowPU:
@@ -3417,6 +3569,11 @@ if __name__ == "__main__":
 
     logger = logging.setup_logger(__file__, args.verbose, args.noColorLogger)
 
+    # Resolve here rather than in the parser: the sensible default depends on whether
+    # the ABCD regions are fit axes, which is only known once --fitvar is parsed.
+    args.fakeEstimation = default_fake_estimation(args)
+    logger.info(f"Fake estimation mode: {args.fakeEstimation}")
+
     if "wwidth" in args.noi:
         parser = parsing.set_parser_default(parser, "widthVariationW", ["48", "36"])
         args = parser.parse_args()
@@ -3432,6 +3589,14 @@ if __name__ == "__main__":
     if isUnfolding and "xsec" in args.noi:
         raise ValueError(
             "Options unfolding and fitting the xsec are incompatible. Please choose one or the other"
+        )
+
+    if args.noTheoryCorrsViaHelicities and set(args.theoryCorrsViaHelicities) != set(
+        rabbit_theory_helper.TheoryHelper.from_hels_sources
+    ):
+        raise ValueError(
+            "Options --noTheoryCorrsViaHelicities and --theoryCorrsViaHelicities are incompatible, "
+            "the former is a shorthand for the latter with no argument"
         )
 
     if isTheoryAgnostic:
