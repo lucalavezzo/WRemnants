@@ -32,6 +32,7 @@ derivatives are wrong.
 from __future__ import annotations
 
 import argparse
+import configparser
 import json
 import pathlib
 from collections import OrderedDict
@@ -46,10 +47,39 @@ from wremnants.postprocessing.scetlib_ad.xsec_backend import (
     config_as_dict,
 )
 from wremnants.production import theory_corrections
-from wremnants.utilities import common
+from wremnants.utilities import common, theory_utils
 from wremnants.utilities.io_tools import input_tools
 from wums import boostHistHelpers as hh
 from wums import ioutils, output_tools
+
+
+def cache_pdf(conf_path, key=None) -> tuple[str, dict, float]:
+    """The PDF set the cache was built with: (pdfMap key, pdfMap entry, alphaS central).
+
+    Read from the cache's own runcard ([QCD] pdf_set, alphas_mu0) and matched to
+    ``theory_utils.pdfMap`` by LHAPDF name, so the denominator histograms and member
+    labels follow the cache rather than assuming CT18Z. ``key`` (a pdfMap key)
+    overrides the lookup, for a set whose runcard name is not a pdfMap lha_name.
+    """
+    cfg = configparser.ConfigParser(inline_comment_prefixes=("#", ";"))
+    cfg.read(conf_path)
+    lha = cfg.get("QCD", "pdf_set").strip()
+    as_cen = cfg.getfloat("QCD", "alphas_mu0")
+    if key is None:
+        hits = [k for k, v in theory_utils.pdfMap.items() if v.get("lha_name") == lha]
+        if len(hits) != 1:
+            raise RuntimeError(
+                f"cache pdf_set {lha!r} matches {len(hits)} pdfMap entries {hits}; "
+                "pass --pdf <pdfMap key>"
+            )
+        key = hits[0]
+    info = theory_utils.pdfMap[key]
+    if info.get("lha_name") != lha:
+        raise RuntimeError(
+            f"--pdf {key} is LHAPDF set {info.get('lha_name')!r}, but the cache was "
+            f"built with {lha!r}"
+        )
+    return key, info, as_cen
 
 
 def nonpdf_points() -> OrderedDict[str, dict[str, float]]:
@@ -590,6 +620,14 @@ def main() -> int:
     )
     parser.add_argument("--pdfas-name", default=None)
     parser.add_argument(
+        "--pdf",
+        default=None,
+        choices=sorted(theory_utils.pdfMap),
+        help="pdfMap key of the cache's PDF set, which names the per-member "
+        "denominators (nominal_gen_<name>, nominal_gen_<name>alphaS<range>). "
+        "Default: matched from the cache runcard's [QCD] pdf_set.",
+    )
+    parser.add_argument(
         "--minnloStyle",
         choices=["production", "responsegrid"],
         default="production",
@@ -735,9 +773,21 @@ def main() -> int:
     pdf_map = as_map = []
     pdf_source_labels = as_source_labels = None
     if args.pdfvars_name or args.pdfas_name:
+        pdf_key, pdf_info, as_cen = cache_pdf(args.conf, args.pdf)
+        pdf_name, lha = pdf_info["name"], pdf_info["lha_name"]
+        if pdf_info["combine"] != "asymHessian":
+            raise RuntimeError(
+                f"{pdf_key}: combine = {pdf_info['combine']!r}; the cache stores an "
+                "up/down member per eigenvector, so only asymHessian sets map onto it"
+            )
         n_eig = sum(name.startswith("pdf_eig") for name in core.param_names)
-        if n_eig != 29:
-            raise RuntimeError(f"expected 29 CT18Z eigenvectors, cache has {n_eig}")
+        if 2 * n_eig + 1 != pdf_info["entries"]:
+            raise RuntimeError(
+                f"cache has {n_eig} eigenvector pairs, but {pdf_key} ({lha}) has "
+                f"{pdf_info['entries']} members; the per-member denominator only "
+                "matches a cache built with ALL of the set's eigenvectors"
+            )
+        print(f"PDF set {lha} (pdfMap {pdf_key!r}): {n_eig} eigenvector pairs")
         pdf_labels = ["pdf0"]
         pdf_points = [{}]
         for eig in range(n_eig):
@@ -745,7 +795,7 @@ def main() -> int:
             pdf_points.extend([{f"pdf_eig{eig}": 1.0}, {f"pdf_eig{eig}": -1.0}])
         pdf_num, pdf_map = numerator(core, fold, base, edges, pdf_labels, pdf_points)
         pdf_den_values, pdf_edges, pdf_source_labels = canonical_values(
-            load_histogram(args.minnlo, "nominal_gen_pdfCT18Z"),
+            load_histogram(args.minnlo, f"nominal_gen_{pdf_name}"),
             True,
             singleton_q_edges=cache_q_edges,
         )
@@ -761,16 +811,16 @@ def main() -> int:
                 f"PDF denominator has {pdf_den_values.shape[-1]} members, "
                 f"expected {len(pdf_labels)}"
             )
-        # The MiNNLO histogram carries the WRemnants names
+        # The MiNNLO histogram carries the WRemnants names, e.g. for CT18Z
         # pdf0CT18Z,pdf1CT18ZDown,pdf1CT18ZUp,... in raw LHAPDF member order.
-        # The cache was built from members 1..58 in that same order.  Validate the
-        # labels rather than pretending they are the shorter correction labels.
-        expected_pdf_source = ["pdf0CT18Z"]
-        for eig in range(1, n_eig + 1):
-            expected_pdf_source.extend([f"pdf{eig}CT18ZDown", f"pdf{eig}CT18ZUp"])
+        # The cache was built from members 1..2*n_eig in that same order.  Validate
+        # the labels rather than pretending they are the shorter correction labels.
+        expected_pdf_source = theory_utils.pdfNamesAsymHessian(
+            pdf_info["entries"], pdf_name
+        )
         if pdf_source_labels != expected_pdf_source:
             raise RuntimeError(
-                "PDF denominator member ordering differs from the CT18Z cache "
+                f"PDF denominator member ordering differs from the {lha} cache "
                 "member order:\n"
                 f"  found:    {pdf_source_labels}\n  expected: {expected_pdf_source}"
             )
@@ -780,16 +830,21 @@ def main() -> int:
         )
 
         # Preserve the established WRemnants correction convention: index zero is
-        # the central member, followed by the low and high alphaS endpoints.
-        as_labels = [
-            "pdfCT18ZNNLO_as_0118",
-            "pdfCT18ZNNLO_as_0116",
-            "pdfCT18ZNNLO_as_0120",
-        ]
-        as_points = [{}, {"alphas": 0.116}, {"alphas": 0.120}]
+        # the central member, followed by the low and high alphaS endpoints.  The
+        # step is the set's alphasRange ("002" -> +-0.002), which is also what names
+        # the denominator; labels follow the builder's <set>_as_<value*1000> sets,
+        # so CT18Z keeps its historical pdfCT18ZNNLO_as_0118/0116/0120.
+        as_step = int(pdf_info["alphasRange"]) / 1000.0
+        # rounded so e.g. 0.118 - 0.002 is exactly 0.116, not 0.11599999999999999
+        as_vals = [as_cen, round(as_cen - as_step, 6), round(as_cen + as_step, 6)]
+        as_tags = [f"{round(v * 1000):04d}" for v in as_vals]
+        as_labels = [f"pdf{lha}_as_{t}" for t in as_tags]
+        as_points = [{}, {"alphas": as_vals[1]}, {"alphas": as_vals[2]}]
         as_num, as_map = numerator(core, fold, base, edges, as_labels, as_points)
         as_den_values, as_edges, as_source_labels = canonical_values(
-            load_histogram(args.minnlo, "nominal_gen_pdfCT18ZalphaS002"),
+            load_histogram(
+                args.minnlo, f"nominal_gen_{pdf_name}alphaS{pdf_info['alphasRange']}"
+            ),
             True,
             singleton_q_edges=cache_q_edges,
         )
@@ -808,7 +863,7 @@ def main() -> int:
         # this order.  This both proves central is index zero and prevents a future
         # histmaker ordering change from silently attaching the wrong denominator.
         as_den_values = reorder_members(
-            as_den_values, as_source_labels, ["as0118", "as0116", "as0120"], "alphaS"
+            as_den_values, as_source_labels, [f"as{t}" for t in as_tags], "alphaS"
         )
         as_den = make_hist(as_den_values, edges, as_labels)
         as_file = correction_file(
