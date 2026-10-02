@@ -151,13 +151,23 @@ asymptote. ``smallb=0`` drops them, leaving only the limiting/interior
 behaviour and the lambda_inf floors -- then use the postfit sigma(qT) >= 0
 check as the real guard.
 
+``margin=<float>`` sets the cushion every margin-carrying condition is enforced
+at (``coeff >= margin`` instead of ``coeff >= 0``; see ``NP_DAMPING_MARGIN``).
+The default is ``NP_DAMPING_MARGIN`` = 0 (since 2026-10-01; it was 5e-3), which
+walls the EXACT damping boundary; pair it with a stiff
+``--regularizationStrength`` (8), since a relu^2 wall at margin 0 settles
+slightly past the boundary. ``margin=5e-3`` reproduces fits made before the
+change. The lambda_inf floors and the tanh_6 interior
+discriminants do not carry the margin, and the held-lambda drop check always
+uses the bare condition, whatever the margin.
+
 Invoke (nothing on the -r line repeats the model spec):
 
     rabbit_fit.py ... \\
-      --regularizationStrength 5 \\
+      --regularizationStrength 8 \\
       -r wremnants.postprocessing.scetlib_ad.np_damping_wall.NPDampingWall \\
          wremnants.postprocessing.scetlib_ad.np_damping_wall.NPDampingMapping \\
-         [smallb=0] [ymax=<float>]
+         [smallb=0] [ymax=<float>] [margin=<float>]
 
 References:
   AN-25-085 theory.tex Eqs. eq:npgamma, eq:npf
@@ -216,18 +226,39 @@ ABSY_AXIS_NAMES = ("absYVGen", "absYVgenSig", "yVGen")
 # the TMD conditions below are incomplete. Values we accept as "not on".
 _NP_MODEL_TMD_OFF = ("off", "none", "")
 
-# Fixed knobs. Only smallb and ymax are exposed on the -r line; these two are
-# constants to keep that line minimal, and they are the values the old wall
-# ran with.
+# Knobs. smallb, ymax and margin are exposed on the -r line; the lambda_inf
+# floor is a fixed constant to keep that line minimal.
 LAMBDA_INF_FLOOR = 1e-3  # positive floor on the lambda_inf saturation scales
-NP_DAMPING_MARGIN = 5e-3  # positive cushion: enforce each damping coeff >= this
-#              rather than >= 0, so the soft wall's equilibrium -- which sits a
-#              hair PAST the knee, where the penalty gradient vanishes -- still
-#              lands in the damping region. NB this cache's correction anchors
-#              lambda4_nu at exactly 0, i.e. ON the boundary, so at theta = 0
-#              the wall already contributes margin^2 = 2.5e-5 (times exp(2 tau))
-#              and biases lambda4_nu up by >= 5e-3 physical = 0.01 theta, one
-#              percent of its prior width. Set to 0 to switch the cushion off.
+NP_DAMPING_MARGIN = 0.0  # DEFAULT cushion: enforce each damping coeff >= this.
+#              0 walls the EXACT damping boundary. Pair it with a stiff wall
+#              (--regularizationStrength 8, i.e. exp(16) ~ 8.9e6): a relu^2 wall
+#              settles past the knee by g / (2 exp(2 tau)), ~1e-5 at tau = 8
+#              for the data pulls seen on card A. Until 2026-10-01 the default
+#              was 5e-3 with tau = 5, a cushion that kept the soft wall's
+#              overshoot (up to 5.2e-3) in the damping region but hid active
+#              faces and biased lambda4_nu (anchored ON the boundary) up by
+#              >= 5e-3. Validated on the nominal lattice fit
+#              (studies/walled-multistart-census, 260930-stiff-wall-refits):
+#              alphaS moved +0.012 sigma, sigma(alphaS) unchanged. Override per
+#              fit with margin=<float> on the -r line (NPDampingMapping),
+#              e.g. margin=5e-3 to reproduce older fits. Finite and >= 0.
+
+
+def _parse_margin(value):
+    """A validated damping margin: a finite float >= 0, or raise."""
+    try:
+        margin = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"np_damping_wall: margin must be a number, got {value!r}"
+        ) from None
+    if not np.isfinite(margin) or margin < 0.0:
+        raise ValueError(
+            f"np_damping_wall: margin must be finite and >= 0, got {value!r}. "
+            "A negative margin would wall a region PAST the damping boundary, "
+            "i.e. admit anti-damping lambdas as 'physical'."
+        )
+    return margin
 
 
 def resolve_form(form, side):
@@ -453,7 +484,9 @@ def damping_conditions(
     ``ymax`` is the binding |Y| (:func:`_binding_absY`). The TMD conditions are
     emitted twice, at Y = 0 and Y = ymax, because L2 is monotonic in Y^2 and so
     the binding rapidity is one extreme or the other depending on the sign of
-    delta_lambda2 -- which the fit is free to flip.
+    delta_lambda2 -- which the fit is free to flip. ``margin`` is the bound of
+    every condition except the lambda_inf floors (``floor``) and the tanh_6
+    interior discriminants (always 0); callers validate it (``_parse_margin``).
     """
     conds = []
 
@@ -641,26 +674,35 @@ def _make_mapping_class():
                            is the range the model evaluates sigma_gen over. Only
                            override for a deliberate study, and record why -- the
                            delta_lambda2 wall scales as 1/ymax^2.
+            margin=<float> the cushion each margin-carrying condition is
+                           enforced at, coeff >= margin (default
+                           NP_DAMPING_MARGIN = 0, the exact damping boundary;
+                           5e-3 before 2026-10-01). Finite and >= 0. The
+                           lambda_inf floors, the tanh_6 interior discriminants
+                           and the held-lambda drop check never use it.
 
         The NP forms and the lambda anchors are derived from the card's recorded
         theory correction (see the module docstring); nothing on the -r line
         repeats the ``--paramModel`` spec.
         """
 
-        def __init__(self, indata, key, smallb=True, ymax=None):
+        def __init__(
+            self, indata, key, smallb=True, ymax=None, margin=NP_DAMPING_MARGIN
+        ):
             super().__init__(indata, key)
             self.indata = indata
             self.smallb = bool(smallb)
             self.ymax = None if ymax is None else float(ymax)
+            self.margin = _parse_margin(margin)
 
         @classmethod
         def parse_args(cls, indata, *args):
-            smallb, ymax = True, None
+            smallb, ymax, margin = True, None, None
             for a in args:
                 if "=" not in a:
                     raise ValueError(
-                        f"NPDampingMapping: args are 'smallb=<0|1>' and "
-                        f"'ymax=<float>', got '{a}'"
+                        f"NPDampingMapping: args are 'smallb=<0|1>', "
+                        f"'ymax=<float>' and 'margin=<float>', got '{a}'"
                     )
                 k, v = a.split("=", 1)
                 k = k.strip()
@@ -668,16 +710,26 @@ def _make_mapping_class():
                     smallb = v.strip().lower() not in ("0", "false", "no", "off")
                 elif k == "ymax":
                     ymax = float(v)
+                elif k == "margin":
+                    margin = _parse_margin(v)
                 else:
                     raise ValueError(
-                        f"NPDampingMapping: unknown key '{k}'; only 'smallb' and "
-                        "'ymax' are supported (the lambda_inf floor and the "
-                        "damping margin are fixed module constants)."
+                        f"NPDampingMapping: unknown key '{k}'; only 'smallb', "
+                        "'ymax' and 'margin' are supported (the lambda_inf floor "
+                        "is a fixed module constant)."
                     )
-            key = f"{cls.__name__} smallb={int(smallb)}" + (
-                f" ymax={ymax:g}" if ymax is not None else ""
+            key = (
+                f"{cls.__name__} smallb={int(smallb)}"
+                + (f" ymax={ymax:g}" if ymax is not None else "")
+                + (f" margin={margin:g}" if margin is not None else "")
             )
-            return cls(indata, key, smallb=smallb, ymax=ymax)
+            return cls(
+                indata,
+                key,
+                smallb=smallb,
+                ymax=ymax,
+                margin=NP_DAMPING_MARGIN if margin is None else margin,
+            )
 
     return NPDampingMapping
 
@@ -697,7 +749,7 @@ def _make_regularizer_class():
             self.mapping = mapping
             self.indata = mapping.indata
             self.enforce_small_b = bool(getattr(mapping, "smallb", True))
-            self.margin = NP_DAMPING_MARGIN
+            self.margin = _parse_margin(getattr(mapping, "margin", NP_DAMPING_MARGIN))
             self.floor = LAMBDA_INF_FLOOR
 
             self.inputs = resolve_wall_inputs(
@@ -817,7 +869,8 @@ def _make_regularizer_class():
                 dropped.append((cond.label, val))
             print(
                 f"[NPDampingWall] armed on {len(self._active)} of "
-                f"{len(self.conditions)} condition(s); fitted lambdas "
+                f"{len(self.conditions)} condition(s) at margin="
+                f"{self.margin:g}; fitted lambdas "
                 f"{sorted(self._idx)}, held at the correction's anchor "
                 f"{self._held}."
                 + (
