@@ -143,9 +143,23 @@ def scetlib_name(rabbit):
 #                     would ADD uncertainty the card does not carry. Frozen by
 #                     default; no reference variation exists to normalise them
 #                     against, which is also why they have no REPARAM map.
+#   lambda2, lambda4, delta_lambda2
+#                     the TMD NP parameters, free since 2026-10-06. In the
+#                     walled nominal fit the data constrain them 12-73x more
+#                     tightly than the old width-0.5 priors, and dropping those
+#                     priors moves alphaS by -0.02 sigma
+#                     (WRemnantsHelpers studies/walled-multistart-census/
+#                     261005-tmd-priors-free). Their REPARAM widths stay: they
+#                     set the theta scale, not a constraint. An UNWALLED fit
+#                     now has nothing holding the TMD physical; pass
+#                     prior_sigmas=lambda2=1,lambda4=1,delta_lambda2=1 to get
+#                     the old priors back.
 FREE_PARAMS = frozenset(
     {
         "alphaS",
+        "lambda2",
+        "lambda4",
+        "delta_lambda2",
         "lambda_inf",
         "lambda_inf_nu",
         "b0_over_bmax_nu",
