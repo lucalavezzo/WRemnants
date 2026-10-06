@@ -1,0 +1,48 @@
+{
+ "groups": [
+  "n_f scheme: SYST nf matched mu=1, linf=2",
+  "k-form: SYST k2, linf=2",
+  "b_T window: SYST drop bT<0.2 fm, linf=2"
+ ],
+ "n": 21,
+ "pert": "our_cs_kernel scheme=fit (nf=5), mu=2 GeV, n3ll, alpha_s(mZ)=0.118",
+ "syst_rule": "delta_g = J_NP(lattice best fit, linf=2) . d_g, d_g = injector's chosen (dl2, dl4) per group",
+ "card2d_mu": [
+  0.18443328818032143,
+  -0.005920453249998788
+ ],
+ "card2d_sigma": [
+  0.0566627849638588,
+  0.003997645689195731
+ ],
+ "card2d_rho": -0.9109547732335456,
+ "max_abs_dpert_dalphas": 3.0283207261735945,
+ "dpert_dalphas_range": [
+  -3.0283207261735945,
+  2.6612754236191027
+ ],
+ "dpert_dtnp_nu_range": [
+  0.0017618266728434001,
+  0.00619768203295612
+ ],
+ "dpert_dtnp_cusp_range": [
+  -0.0008749159115579719,
+  0.00011392047264084659
+ ],
+ "syst_J_norm": [
+  0.11947381035162545,
+  0.19130771300398158,
+  0.03833187772016633
+ ],
+ "pert_scale_metric_stat": {
+  "kappa2_full": 0.13569451545800842,
+  "kappa0.5_full": 1.4474135307208822,
+  "kappa2_canonical": 0.05559022868365322,
+  "kappa0.5_canonical": 0.019314706459661154,
+  "n4ll": 0.04226636537651624
+ },
+ "pert_scale_chosen": "kappa0.5_full",
+ "pert_scale_max_abs": 0.04660090342785181,
+ "pert_scale_max_over_sigma": 0.5279178622613606,
+ "syst_direct_nf_norm": 0.1940619092917713
+}
