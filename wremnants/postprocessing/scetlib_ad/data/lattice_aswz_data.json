@@ -1,0 +1,42 @@
+{
+ "what": "ASWZ lattice Collins-Soper kernel gamma_q(b_T, mu) per ensemble: DATA ONLY (no theory tables). The perturbative + NP kernel at these points is computed by SCETlib at every fit step (lattice_cs_term.py, DrellYan.gamma_nu_points).",
+ "source": "Avkhadiev, Shanahan, Wagman, Zhao, arXiv:2402.06725 (PRL 132 (2024) 231901); author files CS_Pz_x_ave_{L32,L48,L64}[_covariance].csv + README",
+ "md5": {
+  "CS_Pz_x_ave_L32.csv": "6dbb56f29ccc61dc6aa2adad897f5010",
+  "CS_Pz_x_ave_L32_covariance.csv": "7ccd5792a6b684b860521af58a76aefb",
+  "CS_Pz_x_ave_L48.csv": "9205484c901e0c7ca429553d82a8c27d",
+  "CS_Pz_x_ave_L48_covariance.csv": "f61be3c0e5bb1a258a0ec3539f5a8d7f",
+  "CS_Pz_x_ave_L64.csv": "3e94effdb7ec44f23e2aada2b717f5de",
+  "CS_Pz_x_ave_L64_covariance.csv": "beae7311a46146d324e7f29bea223964",
+  "README": "42a1e34caa198201fbb68b0e1cc375d6"
+ },
+ "scheme": "MSbar, mu = 2 GeV, n_f = 4 lattice (2+1+1 HISQ); uNNLL + LRR matching; gamma_q == SCETlib gamma_zeta = gamma_nu / 2 (260923-conventions-map)",
+ "mu_gev": 2.0,
+ "ensembles": {
+  "L32": {
+   "a_fm": 0.15,
+   "n": 6
+  },
+  "L48": {
+   "a_fm": 0.12,
+   "n": 7
+  },
+  "L64": {
+   "a_fm": 0.09,
+   "n": 8
+  }
+ },
+ "lattice_spacings_source": "author README (L32 0.15 fm, L48 0.12 fm, L64 0.09 fm)",
+ "covariance": "block-diagonal across ensembles (no cross-ensemble correlation; author-confirmed adequate 2026-09-29)",
+ "fm_to_gevinv": "1 / hbar c, hbar c = 0.1973269804 GeV fm (kept bit-identical to the phase-3 inputs file)",
+ "n": 21,
+ "built_by": "WRemnantsHelpers studies/lattice-cs-kernel/261007-lattice-term-native/scripts/build_data.py",
+ "crosscheck_vs_phase3_inputs": {
+  "b_fm": true,
+  "a_fm": true,
+  "y": true,
+  "ens": true,
+  "cov_stat": true,
+  "fm_to_gevinv_rel": 3.3139024857575805e-10
+ }
+}

@@ -1425,13 +1425,15 @@ class SCETlibADParamModel(ParamModel):
         vals, _ = self.core.values_and_jacobian(p_full)
         return self._fold(np.asarray(vals, dtype=np.float64))
 
-    def _sigma_gen(self, param):
-        """sigma_gen on the gen grid, differentiable via the SCETlib bridge.
+    def scetlib_full_vector_tf(self, param):
+        """The COMPLETE SCETlib parameter vector the cross section is evaluated
+        at, as a TF expression of this model's fit vector ``param``.
 
-        ``ScetlibCachedXsecTF.__call__`` is an ordinary TF-differentiable function
-        -- its backward pass is itself a ``custom_gradient`` whose own gradient
-        contracts Hessian-vector products -- so nested tapes work and TF drives
-        every C++ call. Nothing here is a surrogate; autodiff sees the real thing.
+        This is the one theta -> physical map. Anything else that evaluates
+        SCETlib at the fit point (the lattice CS-kernel term) must take its
+        alpha_s, TNPs and NP lambdas from here, so the two halves of the
+        likelihood see the SAME tensor -- in the physical, offset-applied frame
+        rabbit hands the model, never a re-derivation of the map.
         """
         # A SLICE, deliberately, where the module docstring forbids a scatter:
         # a scatter's backward pass contains a gather (tf.IndexedSlices, which
@@ -1445,10 +1447,19 @@ class SCETlibADParamModel(ParamModel):
         # matmul and not a scatter.
         held = self._p_base.copy()
         held[self._fit_idx] = 0.0
-        p_full = tf.constant(held, dtype=DTYPE) + tf.linalg.matvec(
+        return tf.constant(held, dtype=DTYPE) + tf.linalg.matvec(
             tf.constant(self._select, dtype=DTYPE), p
         )
-        return self._fold.fold_tf(self.core.tf_fn(p_full))
+
+    def _sigma_gen(self, param):
+        """sigma_gen on the gen grid, differentiable via the SCETlib bridge.
+
+        ``ScetlibCachedXsecTF.__call__`` is an ordinary TF-differentiable function
+        -- its backward pass is itself a ``custom_gradient`` whose own gradient
+        contracts Hessian-vector products -- so nested tapes work and TF drives
+        every C++ call. Nothing here is a surrogate; autodiff sees the real thing.
+        """
+        return self._fold.fold_tf(self.core.tf_fn(self.scetlib_full_vector_tf(param)))
 
     def _ratio_from_param(self, param):
         """Per-fit-bin ratio to the anchor prediction, softly floored positive."""
