@@ -43,6 +43,11 @@ the lattice authors' prescription).
 ``offset=min`` (default): the lattice-only chi2_min at the anchor with the final covariance, so the term is
 1/2 Delta chi2. ``ydata=asimov``: y = gamma_zeta(anchor) + k1asimov a/b (closure; use ``offset=0``).
 
+COMPOSITE MODELS (the saturated test): when the fitter's param model is a rabbit ``CompositeParamModel`` with exactly
+one SCETlibADParamModel among its direct submodels, the SCETlib submodel's own [poi | pou] vector is rebuilt from the
+composite layout by running the composite class's own ``compute`` on recorders (``submodel_vector``), so the term
+follows the composite's permutation instead of re-deriving it. Anything else is refused.
+
 THE exp(2 tau) COMPENSATION: rabbit multiplies every regularizer penalty by exp(2 tau); this term divides it back out
 with the live ``fitter.tau`` (found on the call stack at ``set_expectations``), as ``LatticeCSChi2`` does.
 
@@ -375,6 +380,61 @@ def _find_fitter():
     return None
 
 
+def _is_scetlib_model(m):
+    return hasattr(m, "scetlib_full_vector_tf")
+
+
+def resolve_scetlib_model(pm):
+    """(the SCETlibADParamModel, its index in pm.param_models or None) for a plain or composite param model.
+
+    A rabbit ``CompositeParamModel`` (the saturated test wraps the analysis model in one) is accepted when EXACTLY ONE
+    of its direct submodels carries ``scetlib_full_vector_tf``; anything else (none, two, a composite nested inside a
+    composite) is refused rather than guessed.
+    """
+    if _is_scetlib_model(pm):
+        return pm, None
+    subs = getattr(pm, "param_models", None)
+    if subs is None:
+        raise ValueError(
+            f"LatticeCSTerm: the fitter's param model ({type(pm).__name__}) is neither SCETlibADParamModel nor a "
+            "CompositeParamModel containing one"
+        )
+    hits = [i for i, m in enumerate(subs) if _is_scetlib_model(m)]
+    nested = [i for i, m in enumerate(subs) if hasattr(m, "param_models")]
+    if len(hits) != 1 or nested:
+        raise ValueError(
+            f"LatticeCSTerm: composite param model with {len(hits)} SCETlib submodel(s) and {len(nested)} nested "
+            "composite(s); exactly one SCETlib submodel and no nesting is supported"
+        )
+    return subs[hits[0]], hits[0]
+
+
+class _Recorder:
+    """Stands in for one submodel inside a call of the composite's OWN compute(): records the vector it is handed."""
+
+    def __init__(self, m):
+        self.npoi, self.npou, self.nparams = m.npoi, m.npou, m.nparams
+        self.seen = None
+
+    def compute(self, mparam, full=False):
+        self.seen = mparam
+        return 1.0
+
+
+def submodel_vector(composite, k, param):
+    """The native [poi | pou] vector the composite hands submodel ``k``, obtained by running the composite class's
+    own ``compute`` on recorders (so the permutation is the composite's, not a re-derivation of it).
+    """
+    import types
+
+    recs = [_Recorder(m) for m in composite.param_models]
+    proxy = types.SimpleNamespace(
+        param_models=recs, npoi=composite.npoi, npou=composite.npou
+    )
+    type(composite).compute(proxy, param)
+    return recs[k].seen
+
+
 def _make_regularizer_class():
     import tensorflow as tf
 
@@ -400,7 +460,10 @@ def _make_regularizer_class():
             self.nfmatch = float(getattr(mapping, "nfmatch", DEFAULT_NF_MATCH))
             self.rules = getattr(mapping, "rules", "require")
             self.core = None
+            self._core_backend = None
             self._pm = None
+            self._sub = None
+            self._k = None
             self._tau = None
 
         def __deepcopy__(self, memo):
@@ -412,11 +475,13 @@ def _make_regularizer_class():
             return new
 
         def _build(self, pm):
-            if not hasattr(pm, "scetlib_full_vector_tf"):
-                raise ValueError(
-                    f"LatticeCSTerm: the fitter's param model ({type(pm).__name__}) has no scetlib_full_vector_tf; "
-                    "it needs SCETlibADParamModel (a CompositeParamModel, e.g. the saturated test, is not supported)"
-                )
+            sub, k = resolve_scetlib_model(pm)
+            self._pm, self._k = pm, k
+            self._sub = sub
+            self._npm = int(pm.nparams)
+            if self.core is not None and self._core_backend is sub.core:
+                return  # same SCETlib calculation (e.g. a deepcopy for the saturated test): load-time work is reused
+            pm = sub
             sing = pm.core.tf_fn._sing
             if list(sing.gradient_param_names()) != list(pm.scetlib_names):
                 raise ValueError(
@@ -441,8 +506,7 @@ def _make_regularizer_class():
             )  # noqa: E731
             self.tf_y, self.tf_M = c(self.core.y), c(self.core.M)
             self._gz = self.core.gz
-            self._pm = pm
-            self._npm = int(pm.nparams)
+            self._core_backend = pm.core
             s = self.core.summary()
             print(
                 f"[LatticeCSTerm] {len(self.core.y)} ASWZ points ({self.ydata}), data {self.data}; gamma_zeta from "
@@ -469,11 +533,13 @@ def _make_regularizer_class():
             if self.core is None or self._pm is not pm:
                 self._build(pm)
             if parms is not None:
-                names = list(np.asarray(parms).astype(str))
-                mine = list(np.asarray(pm.params).astype(str))
-                if names[: len(mine)] != mine:
+                names = np.asarray(parms).astype(str)
+                idx = np.asarray(
+                    self.sub_vector(tf.range(len(names), dtype=tf.float64))
+                ).astype(int)
+                if list(names[idx]) != list(np.asarray(self._sub.params).astype(str)):
                     raise ValueError(
-                        "LatticeCSTerm: get_x() does not start with the param model's parameters"
+                        "LatticeCSTerm: the SCETlib submodel's parameters are not where the layout puts them"
                     )
             tau = fitter.tau if fitter is not None else None
             if tau is not None:
@@ -494,13 +560,25 @@ def _make_regularizer_class():
                     else "NONE (scale 1)"
                 )
             print(
-                f"[LatticeCSTerm] armed on get_x()[:{self._npm}] -> scetlib_full_vector_tf; exp(2 tau) "
+                f"[LatticeCSTerm] armed on {type(self._pm).__name__}"
+                + (
+                    ""
+                    if self._k is None
+                    else f" (SCETlib submodel #{self._k}, composite permutation)"
+                )
+                + f": get_x()[:{self._npm}] -> scetlib_full_vector_tf; exp(2 tau) "
                 f"compensation from {src}",
                 flush=True,
             )
 
+        def sub_vector(self, params):
+            """The SCETlib submodel's own fit vector, from get_x() (plain model: its prefix)."""
+            if self._k is None:
+                return params[: self._npm]
+            return submodel_vector(self._pm, self._k, params[: self._npm])
+
         def p_full_tf(self, params):
-            return self._pm.scetlib_full_vector_tf(params[: self._npm])
+            return self._sub.scetlib_full_vector_tf(self.sub_vector(params))
 
         def chi2_tf(self, params):
             z = 0.5 * self._gz(self.p_full_tf(params))

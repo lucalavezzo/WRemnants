@@ -12,7 +12,10 @@ given to exercise the bitwise snapshot check against real rules.
   3. the term's chi2 == the explicit k1 fit of the same residuals (k1 floated by least squares);
   4. TF gradient of the penalty == central finite differences; the parameter the kernel does not depend on has an
      exactly zero gradient;
-  5. exp(2 tau) compensation (tau= on the -r line).
+  5. exp(2 tau) compensation (tau= on the -r line);
+  6. a rabbit CompositeParamModel (as the saturated test builds it), in both submodel orders: the term hands SCETlib
+     exactly the vector the composite's own compute() hands the SCETlib submodel, and its chi2 equals the plain
+     model's at the same physical point, bitwise; two SCETlib submodels are refused.
 Exits 1 on any failure."""
 
 import argparse
@@ -96,6 +99,16 @@ def main():
     class PM:
         params = np.array([f[0].encode() for f in fit])
         nparams = len(fit)
+        npoi, npou = 1, len(fit) - 1
+        xparamdefault = tf.zeros([len(fit)], dtype=tf.float64)
+        allowNegativeParam = True
+        is_linear = False
+        seen = None
+
+        def compute(self, param, full=False):
+            PM.seen = param
+            return tf.ones([], dtype=tf.float64)
+
         scetlib_names = names
         core = types.SimpleNamespace(tf_fn=fn)
         _p_base_anchor = anchor.copy()
@@ -182,6 +195,64 @@ def main():
         "5. penalty == 1/2 (chi2 - offset) exp(-2 tau)",
         abs(float(pen) - half * np.exp(-16.0)) <= 1e-14 * abs(half * np.exp(-16.0)),
     )
+    from rabbit.param_models.param_model import CompositeParamModel
+
+    class Toy:
+        npoi, npou, nparams = 2, 1, 3
+        params = np.array([b"sat0", b"sat1", b"toynui"])
+        xparamdefault = tf.zeros([3], dtype=tf.float64)
+        allowNegativeParam = True
+        is_linear = True
+
+        def compute(self, param, full=False):
+            return tf.ones([], dtype=tf.float64)
+
+    chi2_plain = float(T.chi2_tf(tf.constant(th)))
+    for order in ("scetlib first", "scetlib last"):
+        subs = [PM(), Toy()] if order == "scetlib first" else [Toy(), PM()]
+        comp = CompositeParamModel(subs)
+        cnames = np.asarray(comp.params).astype(str)
+        parms = np.concatenate([cnames, ["theta0", "theta1"]])
+        xc = np.zeros(len(parms))
+        for j, f_ in enumerate(fit):
+            xc[list(cnames).index(f_[0])] = th[j]
+        xc[list(cnames).index("sat0")] = (
+            0.37  # values the SCETlib vector must NOT pick up
+        )
+        xc[list(cnames).index("toynui")] = -1.3
+        m = LT.LatticeCSTermMapping.parse_args(
+            types.SimpleNamespace(channel_info={}, procs=[]),
+            "syst=Jnf+Jbt",
+            "tau=8.0",
+            f"rules={rules}",
+        )
+        Tc = LT.LatticeCSTerm(m, tf.float64)
+        Tc.param_model_override = comp
+        Tc.set_expectations(None, None, parms=parms)
+        comp.compute(tf.constant(xc[: comp.nparams]))
+        mine = Tc.sub_vector(tf.constant(xc)).numpy()
+        check(
+            f"6. composite ({order}): vector == what compute() hands the submodel",
+            np.array_equal(mine, PM.seen.numpy()) and np.array_equal(mine, th),
+        )
+        chi2_c = float(Tc.chi2_tf(tf.constant(xc)))
+        check(
+            f"6. composite ({order}): chi2 == plain model's, bitwise",
+            chi2_c == chi2_plain,
+            f"{chi2_c - chi2_plain:+.1e}",
+        )
+        check(
+            f"6. composite ({order}): load-time numbers identical",
+            Tc.core.chi2_min == T.core.chi2_min,
+        )
+    try:
+        Tb = LT.LatticeCSTerm(m, tf.float64)
+        Tb.param_model_override = CompositeParamModel([PM(), PM()])
+        Tb.set_expectations(None, None, parms=None)
+        check("6. two SCETlib submodels refused", False)
+    except ValueError:
+        check("6. two SCETlib submodels refused", True)
+
     print("ALL PASS" if not FAIL else f"FAILED: {FAIL}")
     return 1 if FAIL else 0
 
