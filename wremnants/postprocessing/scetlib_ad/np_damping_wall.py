@@ -896,6 +896,38 @@ def _make_regularizer_class():
             values = self._physical(params)
             return tf.add_n([c.penalty(values, self._relu2_tf) for c in self._active])
 
+        def constraint_spec(self, params, observables):
+            """The wall as HARD inequality constraints, ``values >= bounds``.
+
+            Only called by rabbit's constrained minimizer (``--minimizerMethod
+            trust-constr``), which then drops the penalty from the loss; every
+            other path uses ``compute_nll_penalty`` and never calls this, so it
+            is inert on a rabbit without the constraint path.
+
+            The feasible set is exactly the penalty's: one entry per ACTIVE
+            condition (armed in ``set_expectations``; conditions reading held
+            lambdas only were checked and dropped there), on the PHYSICAL
+            lambdas, and the penalty is ``sum relu2(bound - value)``.
+            """
+            if not self._active:
+                raise ValueError(
+                    "NPDampingWall.constraint_spec: no active condition (not "
+                    "armed yet, or every condition reads held lambdas only)"
+                )
+            values = self._physical(params)
+            vals = tf.stack(
+                [
+                    tf.cast(c.value(values, self._relu2_tf), self.dtype)
+                    for c in self._active
+                ]
+            )
+            lbs = tf.constant([float(c.bound) for c in self._active], dtype=self.dtype)
+            return vals, lbs
+
+        def constraint_labels(self):
+            """Labels of the ``constraint_spec`` entries, in the same order."""
+            return [c.label for c in self._active]
+
     return NPDampingWall
 
 
