@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Checks of the opt-in C^2 ramp (``smooth=c2``) of
+"""Checks of the C^2 ramp (``smooth=c2``, the default since 2026-10-08) of
 wremnants/postprocessing/scetlib_ad/np_damping_wall.py.
 
 No cache, no card: a stand-in ``indata`` carrying the card-A correction runcard
@@ -20,14 +20,25 @@ No cache, no card: a stand-in ``indata`` carrying the card-A correction runcard
      central finite differences; TF Hessian-vector product == finite
      differences of the TF gradient. Evaluated at points where faces are
      violated inside and beyond the ramp.
-  5. Default unchanged: the wall with no smooth= (and with smooth=relu2)
-     returns exactly the relu^2 sum, bitwise.
+  5. The default is C^2: no smooth= on tanh_2 gives exactly the smooth=c2
+     wall, bitwise. smooth=relu2 returns exactly the relu^2 sum, bitwise, and
+     is bitwise equal to the pre-2026-10-08 default (no smooth=) of the module
+     as of 2f1c3df4, loaded from git.
   6. 1D equilibrium of -g x + k P(x): x* = g/(2k) + delta/2 for g >= k delta,
      sqrt(g delta / k) below.
-  7. Refusals: delta=/bmax= without smooth=c2; a bad smooth= value; delta <= 0;
-     smooth=c2 on tanh_6 (its interior discriminants have no constant scale).
+  7. Refusals: delta=/bmax= with smooth=relu2; a bad smooth= value; delta <= 0;
+     an EXPLICIT smooth=c2 on tanh_6 (its interior discriminants have no
+     constant scale).
+  8. The DEFAULT on tanh_6 (TMD and CS) arms without error: relu^2 on the
+     interior discriminants, C^2 on every other condition, penalty == the mixed
+     numpy reference, and one INFO line naming the relu^2 conditions.
 Exits 1 on any failure."""
 
+import contextlib
+import importlib.util
+import io
+import os
+import subprocess
 import sys
 import types
 
@@ -73,6 +84,30 @@ def fake_indata(np_model="tanh_2", np_model_nu="tanh_2"):
         auxiliary=None,
         procs=np.array(["Z"]),
     )
+
+
+def load_old_module(rev="2f1c3df4"):
+    """np_damping_wall.py as of ``rev`` (the last relu^2-default commit).
+
+    Loaded from ``git show`` into a fresh module, so its default can be
+    compared bitwise against today's ``smooth=relu2``. None if git fails.
+    """
+    repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    path = "wremnants/postprocessing/scetlib_ad/np_damping_wall.py"
+    try:
+        src = subprocess.run(
+            ["git", "-C", repo, "show", f"{rev}:{path}"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+    except Exception as e:  # noqa: BLE001
+        print("   git show failed:", e)
+        return None
+    spec = importlib.util.spec_from_loader("np_damping_wall_old", loader=None)
+    mod = importlib.util.module_from_spec(spec)
+    exec(compile(src, f"{rev}:{path}", "exec"), mod.__dict__)
+    return mod
 
 
 def analytic(x, d):
@@ -263,9 +298,26 @@ def main():
     _, wdef = make("margin=0")
     _, wrel = make("margin=0", "smooth=relu2")
     check(
-        "default mapping smooth == relu2",
-        wdef.smooth == "relu2" and wrel.smooth == "relu2",
+        "default mapping smooth == c2 (not explicit); relu2 explicit",
+        wdef.smooth == "c2"
+        and not wdef.smooth_explicit
+        and wrel.smooth == "relu2"
+        and wrel.smooth_explicit
+        and wc2.smooth_explicit,
     )
+    check(
+        "default tanh_2: C^2 on every active condition",
+        all(fn is not None for fn in wdef._outer) and len(wdef._outer) > 0,
+    )
+
+    old_mod = load_old_module()
+    check("old (2f1c3df4) module loaded from git", old_mod is not None)
+    if old_mod is not None:
+        wold = old_mod.NPDampingWall(
+            old_mod.NPDampingMapping.parse_args(indata, "margin=0"), tf.float64
+        )
+        wold.set_expectations(None, None, parms=names)
+        check("old default was relu2", wold.smooth == "relu2")
     check(
         "c2 mapping parsed",
         wc2.smooth == "c2" and wc2.delta == 1e-3 and wc2.bmax == 12.6,
@@ -296,13 +348,23 @@ def main():
             tf.add_n([c.penalty(vals, wdef._relu2_tf) for c in wdef._active]).numpy()
         )
         check(
-            f"[{lab}] default == relu2 sum, bitwise",
-            tf_pen(wdef, th) == old and tf_pen(wrel, th) == old,
+            f"[{lab}] smooth=relu2 == relu2 sum, bitwise",
+            tf_pen(wrel, th) == old,
+        )
+        if old_mod is not None:
+            check(
+                f"[{lab}] smooth=relu2 == old (2f1c3df4) default, bitwise",
+                tf_pen(wrel, th) == tf_pen(wold, th),
+                f"{tf_pen(wrel, th)!r} vs {tf_pen(wold, th)!r}",
+            )
+        check(
+            f"[{lab}] default == explicit smooth=c2, bitwise",
+            tf_pen(wdef, th) == tf_pen(wc2, th),
         )
         check(
             f"[{lab}] relu2 == numpy reference",
             np.isclose(
-                tf_pen(wdef, th), numpy_penalty(th, "relu2"), rtol=1e-12, atol=1e-300
+                tf_pen(wrel, th), numpy_penalty(th, "relu2"), rtol=1e-12, atol=1e-300
             ),
         )
         pc2 = tf_pen(wc2, th)
@@ -369,12 +431,19 @@ def main():
         return False
 
     check(
-        "delta= without smooth=c2 refused",
-        raises(lambda: Map.parse_args(indata, "delta=1e-3"), ValueError),
+        "delta= with smooth=relu2 refused",
+        raises(
+            lambda: Map.parse_args(indata, "smooth=relu2", "delta=1e-3"), ValueError
+        ),
     )
     check(
-        "bmax= without smooth=c2 refused",
-        raises(lambda: Map.parse_args(indata, "bmax=12"), ValueError),
+        "bmax= with smooth=relu2 refused",
+        raises(lambda: Map.parse_args(indata, "smooth=relu2", "bmax=12"), ValueError),
+    )
+    m = Map.parse_args(indata, "delta=2e-3", "bmax=11")
+    check(
+        "delta=/bmax= accepted with the default (c2)",
+        m.smooth == "c2" and m.delta == 2e-3 and m.bmax == 11.0,
     )
     check(
         "smooth=cubic refused",
@@ -391,7 +460,98 @@ def main():
         w = Wall(Map.parse_args(ind6, "smooth=c2"), tf.float64)
         w.set_expectations(None, None, parms=names6)
 
-    check("smooth=c2 on tanh_6 refused", raises(t6, NotImplementedError))
+    check("explicit smooth=c2 on tanh_6 (TMD) refused", raises(t6, NotImplementedError))
+
+    # ---- 8. the DEFAULT on tanh_6: relu^2 on the discriminants, C^2 elsewhere
+    names66 = np.array(list(names) + ["lambda6", "lambda6_nu"])
+    for forms in (("tanh_6", "tanh_2"), ("tanh_2", "tanh_6"), ("tanh_6", "tanh_6")):
+        ind = fake_indata(*forms)
+        parms = names6 if forms == ("tanh_6", "tanh_2") else names66
+        tag = f"np_model={forms[0]}, np_model_nu={forms[1]}"
+
+        def arm(*args, ind=ind, parms=parms):
+            w = Wall(Map.parse_args(ind, *args), tf.float64)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                w.set_expectations(None, None, parms=parms)
+            return w, buf.getvalue()
+
+        def t6c2(arm=arm):
+            arm("smooth=c2")
+
+        check(f"[{tag}] explicit smooth=c2 refused", raises(t6c2, NotImplementedError))
+        try:
+            w6, out = arm("margin=0")
+        except Exception as e:  # noqa: BLE001
+            check(f"[{tag}] default arms", False, f"{type(e).__name__}: {e}")
+            continue
+        check(f"[{tag}] default arms", w6.smooth == "c2" and not w6.smooth_explicit)
+        disc = [c for c in w6._active if c.scale is None]
+        n_disc = (forms[0] == "tanh_6") * 2 + (forms[1] == "tanh_6")
+        check(
+            f"[{tag}] relu^2 on exactly the {n_disc} discriminant(s), C^2 elsewhere",
+            len(disc) == n_disc
+            and all(
+                (fn is None) == (c.scale is None)
+                for c, fn in zip(w6._active, w6._outer)
+            ),
+        )
+        info = [ln for ln in out.splitlines() if "INFO" in ln]
+        check(
+            f"[{tag}] one INFO line naming the relu^2 conditions",
+            len(info) == 1
+            and all(c.label in info[0] for c in disc)
+            and "(default)" in info[0],
+            info[0] if info else "(none)",
+        )
+        print("   " + info[0] if info else "   (no INFO line)")
+        # penalty == mixed numpy reference (relu^2 on scale None, C^2 else)
+        wr6, _ = arm("margin=0", "smooth=relu2")
+        idx = {n: i for i, n in enumerate(parms)}
+        if forms[1] == "tanh_6":
+            # ONLY the CS interior discriminant violated: lambda4_nu = -0.1,
+            # lambda2_nu = 0.15, lambda6_nu = 0.01 -> 4*0.15*0.01 - 0.01 = -4e-3.
+            # The default must charge exactly relu^2 of it.
+            th = np.zeros(parms.size)
+            th[idx["lambda4_nu"]] = -0.1 / 0.5
+            th[idx["lambda6_nu"]] = (0.01 - 0.1) / 0.1
+            got = tf_pen(w6, th)
+            check(
+                f"[{tag}] CS discriminant alone violated: default == relu^2 of it",
+                np.isclose(got, 4e-3**2, rtol=1e-9) and got == tf_pen(wr6, th),
+                f"{got!r} vs {4e-3 ** 2!r}",
+            )
+        rng6 = np.random.default_rng(6)
+        for trial in range(4):
+            th = rng6.normal(scale=1.5, size=parms.size)
+            v = {
+                n: float(W.physical_from_theta(w6.inputs["specs"][n], th[idx[n]]))
+                for n in w6._idx
+            }
+            v.update(w6._held)
+            ref = 0.0
+            for c in w6._active:
+                x = c.bound - c.value(v, W.numpy_relu2)
+                ref += float(
+                    W.numpy_relu2(x)
+                    if c.scale is None
+                    else W.c2_ramp(x, w6.delta / c.scale)
+                )
+            got = tf_pen(w6, th)
+            check(
+                f"[{tag}] trial {trial}: default penalty == mixed numpy reference",
+                np.isclose(got, ref, rtol=1e-11, atol=1e-300) and np.isfinite(got),
+                f"{got:.6g} vs {ref:.6g}",
+            )
+            got_r = tf_pen(wr6, th)
+            ref_r = sum(
+                float(W.numpy_relu2(c.bound - c.value(v, W.numpy_relu2)))
+                for c in wr6._active
+            )
+            check(
+                f"[{tag}] trial {trial}: smooth=relu2 == relu^2 numpy reference",
+                np.isclose(got_r, ref_r, rtol=1e-11, atol=1e-300),
+            )
 
     print(f"\n{len(FAIL)} failure(s)" + (f": {FAIL}" if FAIL else ""))
     return 1 if FAIL else 0

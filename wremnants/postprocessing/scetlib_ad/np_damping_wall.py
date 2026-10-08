@@ -161,9 +161,10 @@ change. The lambda_inf floors and the tanh_6 interior
 discriminants do not carry the margin, and the held-lambda drop check always
 uses the bare condition, whatever the margin.
 
-``smooth=c2`` (OPT-IN; the default ``smooth=relu2`` is the wall above, unchanged)
-replaces each condition's relu^2 by a curvature-continuous (C^2) ramp. With
-x = bound - coeff the violation and d > 0 the ramp width,
+``smooth=c2`` is THE DEFAULT (since 2026-10-08; ``NP_WALL_SMOOTH``). It replaces
+each condition's relu^2 by a curvature-continuous (C^2) ramp. ``smooth=relu2``
+is the explicit opt-out and gives the original relu^2 wall above, bitwise
+unchanged. With x = bound - coeff the violation and d > 0 the ramp width,
 
     P(x) = 0                          x <= 0
            x^3 / (3 d)                0 < x < d
@@ -186,8 +187,33 @@ cache's rules reach). Each condition carries its own ``scale`` s (exponent per
 unit of coeff at bmax: b^2 for lambda2_nu, b^4 for lambda4_nu, 2 b^2 for L2,
 2 b^4 / (3 lambda_inf^2) for the cubic, ...), and d_raw = delta / s. A single raw
 d would be physically meaningless: 1e-5 is harmless on L2 (GeV^2) but O(0.05)
-in ln F at bmax on the cubic (GeV^6). The tanh_6 interior discriminants have no
-constant scale, so ``smooth=c2`` refuses them.
+in ln F at bmax on the cubic (GeV^6).
+
+CONDITIONS WITH NO CONSTANT SCALE. The tanh_6 interior discriminants
+(``4*lambda2_nu*lambda6_nu - relu(-lambda4_nu)^2`` and its TMD analogue) have no
+constant scale, so their ramp width cannot be set in physical units. What
+happens to them depends on whether ``smooth`` was given:
+  * ``smooth`` NOT given (the default): those conditions keep the relu^2
+    penalty and every other condition gets the C^2 ramp. One INFO line at arm
+    time names the relu^2 conditions. A tanh_2/tanh_2 fit has none, so it is
+    pure C^2. A tanh_6 fit (e.g. ``np_model_nu_fit=tanh_6``) still runs, and
+    the crawl fix covers every face except the discriminants.
+  * an EXPLICIT ``smooth=c2``: such a condition RAISES, as it did before the
+    default changed. An explicit request for C^2 is not silently degraded to
+    a partial relu^2 wall.
+  * ``smooth=relu2``: relu^2 everywhere, the original wall.
+
+WHY THE DEFAULT CHANGED (2026-10-08, approved by Luca). On real fits C^2
+removes the trust-krylov crawl and lands on the same minimum. From the CENS03R
+mid-crawl snapshot, C^2 reached the stiff relu^2 minimum (NOMSTIFF) in 46
+iterations / 1.1 h, while relu^2 from the same point was still +430 above it
+after 1.7 h. At the minimum Delta(alphaS) = +3.9e-6 sigma, sigma(alphaS) is
+unchanged (ratio 0.9999998), and the saturated GoF answer is identical
+(WRemnantsHelpers studies/constrained-fit-strategy/261008-c2-wall-test).
+
+REPRODUCING OLD FITS. A fit command from before 2026-10-08 with no ``smooth=``
+on its -r line ran the relu^2 wall. The same command now gets C^2. To
+reproduce such a fit, add ``smooth=relu2``.
 
 Invoke (nothing on the -r line repeats the model spec):
 
@@ -196,7 +222,14 @@ Invoke (nothing on the -r line repeats the model spec):
       -r wremnants.postprocessing.scetlib_ad.np_damping_wall.NPDampingWall \\
          wremnants.postprocessing.scetlib_ad.np_damping_wall.NPDampingMapping \\
          [smallb=0] [ymax=<float>] [margin=<float>] \\
-         [smooth=c2 [delta=<float>] [bmax=<float>]]
+         [smooth=<c2|relu2>] [delta=<float>] [bmax=<float>]
+
+  smooth omitted   C^2 ramp (default), relu^2 kept on conditions with no
+                   constant scale (the tanh_6 interior discriminants)
+  smooth=c2        C^2 on every condition; REFUSES a no-scale condition
+  smooth=relu2     the pre-2026-10-08 relu^2 wall, bitwise (also how to
+                   reproduce a fit made before then without smooth=)
+  delta=, bmax=    the C^2 ramp width; refused with smooth=relu2
 
 References:
   AN-25-085 theory.tex Eqs. eq:npgamma, eq:npf
@@ -273,10 +306,12 @@ NP_DAMPING_MARGIN = 0.0  # DEFAULT cushion: enforce each damping coeff >= this.
 #              e.g. margin=5e-3 to reproduce older fits. Finite and >= 0.
 
 
-# Opt-in C^2 ramp (smooth=c2; see the module docstring). The default penalty is
-# relu^2, unchanged.
+# Penalty shape (see the module docstring). C^2 is the default since 2026-10-08
+# (studies/constrained-fit-strategy/261008-c2-wall-test); smooth=relu2 is the
+# explicit opt-out, bitwise the pre-2026-10-08 wall. When smooth= is NOT given,
+# conditions with no constant scale (Condition.scale is None) keep relu^2.
 SMOOTH_MODES = ("relu2", "c2")
-NP_WALL_SMOOTH = "relu2"
+NP_WALL_SMOOTH = "c2"
 # Ramp width in units of the NP exponent at b_T = NP_WALL_BMAX. 1e-3 is the
 # physical tolerance proposed in 261006-diagnosis (Diagnosis 1) and ~3x the
 # frozen crawl step g/(2k) ~ 1e-6 GeV^2 on L2(|Y|=2.5) at tau = 8, so a face
@@ -541,7 +576,8 @@ class Condition:
         self.coeff = coeff
         self.bound = bound
         # NP exponent per unit of coeff at b_T = bmax (None: no constant
-        # scale, e.g. the tanh_6 discriminants). Only smooth=c2 reads it.
+        # scale, e.g. the tanh_6 discriminants). Only the C^2 ramp reads it;
+        # with smooth= not given, a None-scale condition stays relu^2.
         self.scale = scale
 
     def value(self, values, relu2):
@@ -572,8 +608,10 @@ def damping_conditions(
     Each condition also carries its ``scale`` -- the NP exponent per unit of its
     coeff at b_T = ``bmax`` (CS: gamma_nu ~ -P(b^2); TMD: ln f^NP ~ -2 b^2 Q(b^2)
     in the unsaturated limit; the cubic is divided by 3 lambda_inf^2, taken at
-    ``lambda_inf_ref``, its held value in every fit so far). Only ``smooth=c2``
-    reads it, to turn the normalised ramp width into each condition's raw units.
+    ``lambda_inf_ref``, its held value in every fit so far). Only the C^2 ramp
+    (``smooth=c2``, the default) reads it, to turn the normalised ramp width into
+    each condition's raw units; ``scale=None`` marks a condition with no constant
+    scale (the tanh_6 interior discriminants).
 
     ``ymax`` is the binding |Y| (:func:`_binding_absY`). The TMD conditions are
     emitted twice, at Y = 0 and Y = ymax, because L2 is monotonic in Y^2 and so
@@ -783,15 +821,21 @@ def _make_mapping_class():
                            5e-3 before 2026-10-01). Finite and >= 0. The
                            lambda_inf floors, the tanh_6 interior discriminants
                            and the held-lambda drop check never use it.
-            smooth=<relu2|c2>
-                           the penalty shape (default relu2, the original C^1
-                           wall). c2: the curvature-continuous ramp of the
-                           module docstring, which removes trust-krylov's
-                           face-crossing limit cycle.
-            delta=<float>  c2 only: the ramp width in units of the NP exponent
+            smooth=<c2|relu2>
+                           the penalty shape. Omitted (the default since
+                           2026-10-08): the curvature-continuous C^2 ramp of
+                           the module docstring, which removes trust-krylov's
+                           face-crossing limit cycle, with relu^2 kept on the
+                           conditions that have no constant scale (the tanh_6
+                           interior discriminants; one INFO line names them).
+                           c2: C^2 on every condition, and a no-scale
+                           condition RAISES. relu2: the original C^1 wall,
+                           bitwise; use it to reproduce a fit made before
+                           2026-10-08 without smooth=.
+            delta=<float>  C^2 only: the ramp width in units of the NP exponent
                            at b_T = bmax (default NP_WALL_C2_DELTA = 1e-3),
                            converted per condition to its raw units.
-            bmax=<float>   c2 only: the b_T [GeV^-1] that normalisation refers
+            bmax=<float>   C^2 only: the b_T [GeV^-1] that normalisation refers
                            to (default NP_WALL_BMAX = 12.6).
 
         The NP forms and the lambda anchors are derived from the card's recorded
@@ -806,7 +850,7 @@ def _make_mapping_class():
             smallb=True,
             ymax=None,
             margin=NP_DAMPING_MARGIN,
-            smooth=NP_WALL_SMOOTH,
+            smooth=None,
             delta=None,
             bmax=None,
         ):
@@ -815,11 +859,15 @@ def _make_mapping_class():
             self.smallb = bool(smallb)
             self.ymax = None if ymax is None else float(ymax)
             self.margin = _parse_margin(margin)
-            self.smooth = _parse_smooth(smooth)
+            # smooth=None means "not given": NP_WALL_SMOOTH, with relu^2 kept
+            # on no-scale conditions. smooth_explicit tells the regularizer
+            # whether to fall back (default) or refuse (explicit c2).
+            self.smooth_explicit = smooth is not None
+            self.smooth = _parse_smooth(NP_WALL_SMOOTH if smooth is None else smooth)
             if self.smooth != "c2" and (delta is not None or bmax is not None):
                 raise ValueError(
-                    "NPDampingMapping: delta= and bmax= set the C^2 ramp and "
-                    "need smooth=c2; with the relu2 wall they would be ignored."
+                    "NPDampingMapping: delta= and bmax= set the C^2 ramp, which "
+                    f"smooth={self.smooth} does not use; they would be ignored."
                 )
             self.delta = (
                 NP_WALL_C2_DELTA if delta is None else _parse_positive(delta, "delta")
@@ -872,7 +920,7 @@ def _make_mapping_class():
                 smallb=smallb,
                 ymax=ymax,
                 margin=NP_DAMPING_MARGIN if margin is None else margin,
-                smooth=NP_WALL_SMOOTH if smooth is None else smooth,
+                smooth=smooth,
                 delta=delta,
                 bmax=bmax,
             )
@@ -897,7 +945,15 @@ def _make_regularizer_class():
             self.enforce_small_b = bool(getattr(mapping, "smallb", True))
             self.margin = _parse_margin(getattr(mapping, "margin", NP_DAMPING_MARGIN))
             self.floor = LAMBDA_INF_FLOOR
-            self.smooth = _parse_smooth(getattr(mapping, "smooth", NP_WALL_SMOOTH))
+            raw_smooth = getattr(mapping, "smooth", None)
+            # Explicit unless the mapping says otherwise; a mapping with no
+            # smooth attribute at all is the default.
+            self.smooth_explicit = bool(
+                getattr(mapping, "smooth_explicit", raw_smooth is not None)
+            )
+            self.smooth = _parse_smooth(
+                NP_WALL_SMOOTH if raw_smooth is None else raw_smooth
+            )
             self.delta = float(getattr(mapping, "delta", NP_WALL_C2_DELTA))
             self.bmax = float(getattr(mapping, "bmax", NP_WALL_BMAX))
 
@@ -924,6 +980,7 @@ def _make_regularizer_class():
                 f"smallb={int(self.enforce_small_b)}, "
                 f"margin={self.margin:g}, lambda_inf floor={self.floor:g}, "
                 f"smooth={self.smooth}"
+                + ("" if self.smooth_explicit else " (default)")
                 + (
                     f" (delta={self.delta:g} in the NP exponent at "
                     f"b_T={self.bmax:g} GeV^-1)"
@@ -972,13 +1029,19 @@ def _make_regularizer_class():
             self._outer = []
 
         def _c2_outer(self, cond):
-            """The C^2 ramp for one condition, its width in raw units."""
+            """The C^2 ramp for one condition, its width in raw units.
+
+            A no-scale condition raises here. Only an EXPLICIT smooth=c2 gets
+            that far: the default path keeps those conditions on relu^2 and
+            never calls this for them (see set_expectations).
+            """
             if cond.scale is None:
                 raise NotImplementedError(
                     f"NPDampingWall smooth=c2: the condition '{cond.label}' has "
                     "no constant physical scale (a tanh_6 interior "
                     "discriminant), so its ramp width cannot be set in physical "
-                    "units. Use smooth=relu2 for this form."
+                    "units. Omit smooth= to keep relu^2 on such conditions and "
+                    "C^2 on the rest, or use smooth=relu2 for the whole wall."
                 )
             d = float(self.delta / cond.scale)
             return d, lambda x: c2_ramp(x, d, maximum=tf.maximum, minimum=tf.minimum)
@@ -1044,7 +1107,13 @@ def _make_regularizer_class():
             self._outer = [None] * len(self._active)
             if self.smooth == "c2":
                 lines = []
+                kept_relu2 = []
                 for i, cond in enumerate(self._active):
+                    if cond.scale is None and not self.smooth_explicit:
+                        # default C^2: no physical ramp width for this one, so
+                        # it keeps relu^2 (outer None = relu2 in penalty())
+                        kept_relu2.append(cond.label)
+                        continue
                     d, fn = self._c2_outer(cond)
                     self._outer[i] = fn
                     lines.append(
@@ -1052,11 +1121,26 @@ def _make_regularizer_class():
                         f"width {d:.3g} raw, extra overshoot <= d/2 = {d / 2:.3g} "
                         f"raw = {self.delta / 2:g} in the exponent at b_max"
                     )
+                n_c2 = len(self._active) - len(kept_relu2)
                 print(
-                    "[NPDampingWall] C^2 ramp per active condition:\n  "
-                    + "\n  ".join(lines),
+                    f"[NPDampingWall] INFO smooth=c2"
+                    f"{'' if self.smooth_explicit else ' (default)'}: C^2 ramp on "
+                    f"{n_c2} of {len(self._active)} active condition(s); relu^2 on "
+                    + (
+                        f"{len(kept_relu2)} with no constant scale: "
+                        + "; ".join(kept_relu2)
+                        if kept_relu2
+                        else "none"
+                    )
+                    + ".",
                     flush=True,
                 )
+                if lines:
+                    print(
+                        "[NPDampingWall] C^2 ramp per condition:\n  "
+                        + "\n  ".join(lines),
+                        flush=True,
+                    )
             print(
                 f"[NPDampingWall] armed on {len(self._active)} of "
                 f"{len(self.conditions)} condition(s) at margin="
@@ -1106,7 +1190,8 @@ def _make_regularizer_class():
             The feasible set is exactly the penalty's: one entry per ACTIVE
             condition (armed in ``set_expectations``; conditions reading held
             lambdas only were checked and dropped there), on the PHYSICAL
-            lambdas, and the penalty is ``sum relu2(bound - value)``.
+            lambdas, and the penalty is ``sum P(bound - value)`` with P the
+            relu^2 or the C^2 ramp, both zero exactly when value >= bound.
             """
             if not self._active:
                 raise ValueError(
