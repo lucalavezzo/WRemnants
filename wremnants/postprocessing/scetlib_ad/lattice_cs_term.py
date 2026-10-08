@@ -28,9 +28,16 @@ Covariance C = C_stat + sum_g delta_g delta_g^T (each delta_g a point shift = a 
 computed AT LOAD from SCETlib, at the anchor (alpha_s, TNPs and lambda_inf_nu of the param model's anchor), with
 lattice-only refits of (lambda2_nu, lambda4_nu) on the stat covariance, k1 profiled:
 
-    Jnf        n_f scheme. Alternative kernel = our n_f = 5 kernel at mu = nfmatch (default 1 GeV) evolved to 2 GeV with
-               the n_f = 4 cusp, alpha_s^(4)(nfmatch) := alpha_s^(5)(nfmatch) (``gamma_nu_points(nf=4, mu_match)``, the
-               SCETlib-native "n_f identified at 1 GeV"). d = lambda_hat(alt) - lambda_hat(nominal), delta = J_NP d.
+    Jnf        n_f scheme. Alternative kernel (``gamma_nu_points(nf=4, mu_match=nfmatch)``: n_f = 4 in beta, cusp and
+               boundary, alpha_s^(4)(nfmatch) := alpha_s^(5)(nfmatch), the coupling IDENTIFIED at nfmatch):
+                 nfscheme=evolve (default): our n_f = 5 kernel at mu = nfswitch, evolved to 2 GeV with n_f = 4,
+                   alt = z5(nfswitch) + [z4(2 GeV) - z4(nfswitch)]; nfswitch defaults to nfmatch (default 1 GeV), the
+                   SCETlib-native "n_f identified at 1 GeV". nfswitch=1 nfmatch=4.18: the old table's convention
+                   (n_f = 4 evolution 1 -> 2 GeV with alpha_s^(4) from m_b(m_b), identified instead of decoupled).
+                 nfscheme=full: the whole kernel in n_f = 4 (boundary at mu0 and evolution to 2 GeV), alt = z4(2 GeV);
+                   with nfmatch=4.18 that is "n_f = 4 below m_b, coupling identified at m_b(m_b)".
+               The shift alt - nominal is computed once at the load-time reference (the NP part cancels exactly).
+               d = lambda_hat(alt) - lambda_hat(nominal), delta = J_NP d.
     Jbt        b_T window: d = lambda_hat(b_T >= 0.2 fm) - lambda_hat(all), delta = J_NP d.
     direct_nf  the n_f group as the direct point shift alt - nominal (instead of Jnf).
     none       stat only.
@@ -42,6 +49,16 @@ the lattice authors' prescription).
 
 ``offset=min`` (default): the lattice-only chi2_min at the anchor with the final covariance, so the term is
 1/2 Delta chi2. ``ydata=asimov``: y = gamma_zeta(anchor) + k1asimov a/b (closure; use ``offset=0``).
+
+PERTURBATIVE PART: ``pert=live`` (default) evaluates the kernel at p_full, so alpha_s and the CS TNPs move the lattice
+comparison exactly as they move the cross section. ``pert=frozen alphas_frozen=0.1168``: the kernel compared with the
+lattice points is evaluated at a FIXED reference -- the param model's anchor with alpha_s(mZ) := alphas_frozen (default
+0.1168, the value the ASWZ matching corresponds to: alpha_s^(4)(2 GeV) = 0.293) and the CS TNPs (tnp_gamma_cusp,
+tnp_gamma_nu) := 0 -- except the CS NP lambdas (np_gnu_lambda2, np_gnu_lambda4), which come from p_full. Every other
+entry, lambda_inf_nu included, stays at that reference. The lattice then constrains only the CS NP parameters: its
+gradient and Hessian with respect to alpha_s and the TNPs are exactly zero, and all load-time quantities (n_f shift,
+refits, J_NP, covariance, offset) are computed at that reference. The cross section is untouched (alpha_s and the TNPs
+float there as usual). The term's value then depends on public parameters only and may be printed.
 
 COMPOSITE MODELS (the saturated test): when the fitter's param model is a rabbit ``CompositeParamModel`` with exactly
 one SCETlibADParamModel among its direct submodels, the SCETlib submodel's own [poi | pou] vector is rebuilt from the
@@ -61,7 +78,8 @@ Invoke (composes with the wall; each on its own -r):
          wremnants.postprocessing.scetlib_ad.np_damping_wall.NPDampingMapping margin=0 \\
       -r wremnants.postprocessing.scetlib_ad.lattice_cs_term.LatticeCSTerm \\
          wremnants.postprocessing.scetlib_ad.lattice_cs_term.LatticeCSTermMapping \\
-         [syst=Jnf+Jbt|...] [nfmatch=1.0] [offset=min|<float>] [ydata=lattice|asimov] [k1asimov=0.2] [data=<npz>]
+         [syst=Jnf+Jbt|...] [nfmatch=1.0] [nfswitch=<GeV>] [nfscheme=evolve|full] [pert=live|frozen]
+         [alphas_frozen=0.1168] [offset=min|<float>] [ydata=lattice|asimov] [k1asimov=0.2] [data=<npz>]
 
 Requires a SCETlib build with ``DrellYan.gamma_nu_points`` (scetlib-cms >= 6ab371a on branch gamma-nu-points).
 """
@@ -80,7 +98,38 @@ BT_WINDOW_FM = 0.2
 DEFAULT_SYST = "Jnf+Jbt"
 SYST_COMPONENTS = ("Jnf", "Jbt", "direct_nf", "none")
 FIT_LAMBDAS = ("np_gnu_lambda2", "np_gnu_lambda4")  # SCETlib names refit at load
-_KEYS = ("data", "syst", "offset", "tau", "ydata", "k1asimov", "nfmatch", "rules")
+NF_SCHEMES = ("evolve", "full")
+PERT_MODES = ("live", "frozen")
+DEFAULT_ALPHAS_FROZEN = (
+    0.1168  # ASWZ: alpha_s^(4)(2 GeV) = 0.293 <-> alpha_s(mZ) = 0.1168 (m_b decoupling)
+)
+FROZEN_TNPS = (
+    "tnp_gamma_cusp",
+    "tnp_gamma_nu",
+)  # the CS-kernel TNPs, set to 0 in the frozen reference
+_KEYS = (
+    "data",
+    "syst",
+    "offset",
+    "tau",
+    "ydata",
+    "k1asimov",
+    "nfmatch",
+    "nfswitch",
+    "nfscheme",
+    "pert",
+    "alphas_frozen",
+    "rules",
+)
+
+
+def frozen_reference(names, p_anchor, alphas_frozen):
+    """The pert=frozen reference: the anchor with alpha_s := alphas_frozen and the CS TNPs := 0."""
+    p = np.array(p_anchor, float).copy()
+    p[list(names).index("alphas")] = float(alphas_frozen)
+    for n in FROZEN_TNPS:
+        p[list(names).index(n)] = 0.0
+    return p
 
 
 def _import_gamma_nu_tf():
@@ -134,6 +183,8 @@ class LatticeCSNativeCore:
         ydata="lattice",
         k1asimov=0.2,
         require_rules=True,
+        nf_switch=None,
+        nf_scheme="evolve",
     ):
         ScetlibGammaNuTF = _import_gamma_nu_tf()
         d = np.load(data)
@@ -162,6 +213,10 @@ class LatticeCSNativeCore:
         self.ilam = [self.names.index(n) for n in FIT_LAMBDAS]
         self.syst = str(syst)
         self.nf_match = float(nf_match)
+        self.nf_switch = self.nf_match if nf_switch is None else float(nf_switch)
+        if nf_scheme not in NF_SCHEMES:
+            raise ValueError(f"nf_scheme={nf_scheme!r} ({'|'.join(NF_SCHEMES)})")
+        self.nf_scheme = nf_scheme
         self.ydata = ydata
         if ydata == "asimov":
             self.k1asimov = float(k1asimov)
@@ -172,7 +227,7 @@ class LatticeCSNativeCore:
             raise ValueError(f"ydata={ydata!r} (lattice|asimov)")
 
         # ---- n_f-scheme alternative, SCETlib-native (a point shift; the NP part cancels exactly)
-        self.nf_shift = self._nf_shift(self.nf_match)
+        self.nf_shift = self._nf_shift(self.nf_match, self.nf_switch, self.nf_scheme)
 
         # ---- lattice-only refits on the stat covariance (k1 profiled), at the anchor
         all_pts = np.arange(len(self.y))
@@ -228,14 +283,24 @@ class LatticeCSNativeCore:
             out.append(0.5 * np.asarray(r["hess"]))
         return out[0] if order == 0 else tuple(out)
 
-    def _nf_shift(self, mu_match):
-        """alt - nominal, alt = zeta^(5)(mu_match) + [zeta^(4)(2 GeV) - zeta^(4)(mu_match)], at p_ref."""
+    def _nf_shift(self, mu_match, mu_switch=None, scheme="evolve"):
+        """alt - nominal at p_ref, with z4 = the n_f = 4 kernel whose coupling is identified at mu_match:
+
+        evolve: alt = z5(mu_switch) + [z4(mu) - z4(mu_switch)]  (n_f = 4 evolution mu_switch -> mu; mu_switch defaults
+                to mu_match, the original single-scale form)
+        full:   alt = z4(mu)                                    (boundary and evolution in n_f = 4)
+        """
         p = self.p_ref
         z5_mu = self.zeta(p)
-        z5_m = self.zeta(p, mu=mu_match)
         z4_mu = self.zeta(p, nf=NF_ALT, mu_match=mu_match)
-        z4_m = self.zeta(p, mu=mu_match, nf=NF_ALT, mu_match=mu_match)
-        return (z5_m + z4_mu - z4_m) - z5_mu
+        if scheme == "full":
+            return z4_mu - z5_mu
+        if scheme != "evolve":
+            raise ValueError(f"nf scheme {scheme!r} ({'|'.join(NF_SCHEMES)})")
+        mu_switch = mu_match if mu_switch is None else mu_switch
+        z5_s = self.zeta(p, mu=mu_switch)
+        z4_s = self.zeta(p, mu=mu_switch, nf=NF_ALT, mu_match=mu_match)
+        return (z5_s + z4_mu - z4_s) - z5_mu
 
     def _p_lam(self, lam):
         p = self.p_ref.copy()
@@ -302,6 +367,8 @@ class LatticeCSNativeCore:
             data=self.data_path,
             syst=self.syst,
             nf_match=self.nf_match,
+            nf_switch=self.nf_switch,
+            nf_scheme=self.nf_scheme,
             ydata=self.ydata,
             anchor_alphas=float(self.p_ref[self.names.index("alphas")]),
             nominal_stat_fit=dict(lam=fn["lam"].tolist(), chi2=fn["chi2"]),
@@ -338,6 +405,28 @@ def _make_mapping_class():
                 )
             self.k1asimov = float(kw.get("k1asimov", 0.2))
             self.nfmatch = float(kw.get("nfmatch", DEFAULT_NF_MATCH))
+            self.nfswitch = (
+                float(kw["nfswitch"]) if kw.get("nfswitch") is not None else None
+            )
+            self.nfscheme = kw.get("nfscheme", "evolve")
+            if self.nfscheme not in NF_SCHEMES:
+                raise ValueError(
+                    f"LatticeCSTermMapping: nfscheme={self.nfscheme!r} ({'|'.join(NF_SCHEMES)})"
+                )
+            if self.nfscheme == "full" and self.nfswitch is not None:
+                raise ValueError(
+                    "LatticeCSTermMapping: nfswitch has no meaning with nfscheme=full"
+                )
+            self.pert = kw.get("pert", "live")
+            if self.pert not in PERT_MODES:
+                raise ValueError(
+                    f"LatticeCSTermMapping: pert={self.pert!r} ({'|'.join(PERT_MODES)})"
+                )
+            if self.pert == "live" and kw.get("alphas_frozen") is not None:
+                raise ValueError(
+                    "LatticeCSTermMapping: alphas_frozen needs pert=frozen"
+                )
+            self.alphas_frozen = float(kw.get("alphas_frozen", DEFAULT_ALPHAS_FROZEN))
             self.rules = kw.get("rules", "require")
             if self.rules not in ("require", "any"):
                 raise ValueError(
@@ -458,6 +547,12 @@ def _make_regularizer_class():
             self.ydata = getattr(mapping, "ydata", "lattice")
             self.k1asimov = float(getattr(mapping, "k1asimov", 0.2))
             self.nfmatch = float(getattr(mapping, "nfmatch", DEFAULT_NF_MATCH))
+            self.nfswitch = getattr(mapping, "nfswitch", None)
+            self.nfscheme = getattr(mapping, "nfscheme", "evolve")
+            self.pert = getattr(mapping, "pert", "live")
+            self.alphas_frozen = float(
+                getattr(mapping, "alphas_frozen", DEFAULT_ALPHAS_FROZEN)
+            )
             self.rules = getattr(mapping, "rules", "require")
             self.core = None
             self._core_backend = None
@@ -487,16 +582,39 @@ def _make_regularizer_class():
                 raise ValueError(
                     "LatticeCSTerm: SCETlib parameter registry differs from the param model's"
                 )
+            p_ref = np.array(pm._p_base_anchor, float)
+            if self.pert == "frozen":
+                p_ref = frozen_reference(pm.scetlib_names, p_ref, self.alphas_frozen)
             self.core = LatticeCSNativeCore(
                 sing,
-                pm._p_base_anchor,
+                p_ref,
                 data=self.data,
                 syst=self.syst,
                 nf_match=self.nfmatch,
                 ydata=self.ydata,
                 k1asimov=self.k1asimov,
                 require_rules=self.rules == "require",
+                nf_switch=self.nfswitch,
+                nf_scheme=self.nfscheme,
             )
+            if self.pert == "frozen":
+                live = np.zeros(len(p_ref))
+                live[self.core.ilam] = 1.0
+                # p_kernel = p_frz (1 - m) + m p_full: a constant 0/1 product, so every frozen entry has an exactly
+                # zero first and second derivative and the live ones pass through unchanged (bitwise)
+                self._tf_pfrz = tf.constant(p_ref * (1.0 - live), dtype=self.dtype)
+                self._tf_mlive = tf.constant(live, dtype=self.dtype)
+                frozen_dep = [
+                    n
+                    for n in pm.scetlib_names
+                    if n.startswith("np_gnu_") and n not in FIT_LAMBDAS
+                ]
+                pert_txt = (
+                    f"pert=frozen: kernel at alpha_s(mZ) = {self.alphas_frozen:g}, CS TNPs "
+                    f"{list(FROZEN_TNPS)} = 0, {frozen_dep} at the anchor; only {list(FIT_LAMBDAS)} from p_full"
+                )
+            else:
+                pert_txt = "pert=live: alpha_s, CS TNPs and CS lambdas from p_full"
             if self.offset_arg == "min":
                 self.offset = float(self.core.chi2_min)
             else:
@@ -512,9 +630,15 @@ def _make_regularizer_class():
                 f"[LatticeCSTerm] {len(self.core.y)} ASWZ points ({self.ydata}), data {self.data}; gamma_zeta from "
                 f"SCETlib DrellYan.gamma_nu_points (snapshot status {self.core.gz.snapshot_status}: "
                 f"{'== loaded rules, bitwise' if self.core.gz.snapshot_status == 1 else 'NOT checked against rules'})"
-                f", mu = {self.core.mu} GeV, at p_full = param model scetlib_full_vector_tf (alpha_s, CS TNPs, CS "
-                f"lambdas live), k1 profiled. Load-time (anchor alpha_s {s['anchor_alphas']:g}, anchor TNPs): "
-                f"syst={self.syst} {s['syst_info']}, n_f alternative identified at {self.nfmatch:g} GeV (shift "
+                f", mu = {self.core.mu} GeV, p_full = param model scetlib_full_vector_tf; {pert_txt}; k1 profiled. "
+                f"Load-time (reference alpha_s {s['anchor_alphas']:g}, reference TNPs): "
+                f"syst={self.syst} {s['syst_info']}, n_f alternative ({self.core.nf_scheme}"
+                + (
+                    f", n_f = 4 evolution from {self.core.nf_switch:g} GeV"
+                    if self.core.nf_scheme == "evolve"
+                    else ", whole kernel n_f = 4"
+                )
+                + f", coupling identified at {self.nfmatch:g} GeV; shift "
                 f"{s['nf_shift_range'][0]:+.5f}..{s['nf_shift_range'][1]:+.5f}); stat-only lattice fit "
                 f"lambda=({s['nominal_stat_fit']['lam'][0]:.5f}, {s['nominal_stat_fit']['lam'][1]:.6f}) chi2 "
                 f"{s['nominal_stat_fit']['chi2']:.4f}; final chi2_min {s['chi2_min']:.6f}; offset = {self.offset:.6f}",
@@ -580,8 +704,16 @@ def _make_regularizer_class():
         def p_full_tf(self, params):
             return self._sub.scetlib_full_vector_tf(self.sub_vector(params))
 
+        def p_kernel_tf(self, params):
+            """The vector the lattice kernel is evaluated at: p_full (live), or the frozen reference with the CS NP
+            lambdas from p_full (frozen)."""
+            p = self.p_full_tf(params)
+            if self.pert == "frozen":
+                p = self._tf_pfrz + self._tf_mlive * p
+            return p
+
         def chi2_tf(self, params):
-            z = 0.5 * self._gz(self.p_full_tf(params))
+            z = 0.5 * self._gz(self.p_kernel_tf(params))
             r = z - self.tf_y
             return tf.tensordot(r, tf.linalg.matvec(self.tf_M, r), 1)
 
