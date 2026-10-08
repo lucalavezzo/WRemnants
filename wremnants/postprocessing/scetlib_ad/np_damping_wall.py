@@ -161,13 +161,42 @@ change. The lambda_inf floors and the tanh_6 interior
 discriminants do not carry the margin, and the held-lambda drop check always
 uses the bare condition, whatever the margin.
 
+``smooth=c2`` (OPT-IN; the default ``smooth=relu2`` is the wall above, unchanged)
+replaces each condition's relu^2 by a curvature-continuous (C^2) ramp. With
+x = bound - coeff the violation and d > 0 the ramp width,
+
+    P(x) = 0                          x <= 0
+           x^3 / (3 d)                0 < x < d
+           x^2 - d x + d^2 / 3        x >= d
+
+P, P' and P'' are continuous at 0 and at d, and P'' = 2 (relu^2's) for x >= d.
+WHY. relu^2's curvature jumps 0 -> 2k at the face. trust-krylov's model built on
+the slack side then has no wall curvature, the iterate zig-zags across the face,
+and scipy's radius rule (grow only if rho > 0.75 AND the step hits the boundary)
+freezes the radius at ~1/k: a limit cycle that gains a constant amount per
+iteration for hours (the "crawl"; studies/constrained-fit-strategy/
+261006-diagnosis, Diagnosis 2). With the ramp a face crossing by dx < d costs
+k dx^3/(3d) instead of k dx^2, so the boundary step keeps rho > 0.75.
+THE COST is overshoot: the equilibrium violation is g/(2k) + d/2 when the data
+force g exceeds k d, and sqrt(g d / k) below it -- at most ~d/2 extra.
+d IS SET PER CONDITION, in physical units: ``delta=<float>`` (default
+``NP_WALL_C2_DELTA`` = 1e-3) is the ramp width in units of the NP exponent at
+b_T = ``bmax`` (default ``NP_WALL_BMAX`` = 12.6 GeV^-1, the largest b_T the AD
+cache's rules reach). Each condition carries its own ``scale`` s (exponent per
+unit of coeff at bmax: b^2 for lambda2_nu, b^4 for lambda4_nu, 2 b^2 for L2,
+2 b^4 / (3 lambda_inf^2) for the cubic, ...), and d_raw = delta / s. A single raw
+d would be physically meaningless: 1e-5 is harmless on L2 (GeV^2) but O(0.05)
+in ln F at bmax on the cubic (GeV^6). The tanh_6 interior discriminants have no
+constant scale, so ``smooth=c2`` refuses them.
+
 Invoke (nothing on the -r line repeats the model spec):
 
     rabbit_fit.py ... \\
       --regularizationStrength 8 \\
       -r wremnants.postprocessing.scetlib_ad.np_damping_wall.NPDampingWall \\
          wremnants.postprocessing.scetlib_ad.np_damping_wall.NPDampingMapping \\
-         [smallb=0] [ymax=<float>] [margin=<float>]
+         [smallb=0] [ymax=<float>] [margin=<float>] \\
+         [smooth=c2 [delta=<float>] [bmax=<float>]]
 
 References:
   AN-25-085 theory.tex Eqs. eq:npgamma, eq:npf
@@ -242,6 +271,57 @@ NP_DAMPING_MARGIN = 0.0  # DEFAULT cushion: enforce each damping coeff >= this.
 #              alphaS moved +0.012 sigma, sigma(alphaS) unchanged. Override per
 #              fit with margin=<float> on the -r line (NPDampingMapping),
 #              e.g. margin=5e-3 to reproduce older fits. Finite and >= 0.
+
+
+# Opt-in C^2 ramp (smooth=c2; see the module docstring). The default penalty is
+# relu^2, unchanged.
+SMOOTH_MODES = ("relu2", "c2")
+NP_WALL_SMOOTH = "relu2"
+# Ramp width in units of the NP exponent at b_T = NP_WALL_BMAX. 1e-3 is the
+# physical tolerance proposed in 261006-diagnosis (Diagnosis 1) and ~3x the
+# frozen crawl step g/(2k) ~ 1e-6 GeV^2 on L2(|Y|=2.5) at tau = 8, so a face
+# crossing costs ~(dx/3d) ~ 10% of relu^2's and the boundary step keeps rho > 0.75.
+NP_WALL_C2_DELTA = 1e-3
+# Largest b_T the AD cache's compressed rules reach (pdf62_y35_260921 and the
+# 260827 cache alike: 12.64 GeV^-1; 261006-diagnosis cache_breach.json).
+NP_WALL_BMAX = 12.6
+
+
+def _parse_positive(value, what):
+    """A finite float > 0, or raise."""
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"np_damping_wall: {what} must be a number, got {value!r}"
+        ) from None
+    if not np.isfinite(out) or out <= 0.0:
+        raise ValueError(
+            f"np_damping_wall: {what} must be finite and > 0, got {value!r}"
+        )
+    return out
+
+
+def _parse_smooth(value):
+    mode = str(value).strip().lower()
+    if mode not in SMOOTH_MODES:
+        raise ValueError(
+            f"np_damping_wall: smooth must be one of {SMOOTH_MODES}, got {value!r}"
+        )
+    return mode
+
+
+def c2_ramp(x, delta, maximum=np.maximum, minimum=np.minimum):
+    """The C^2 penalty P(x) of the module docstring, branch-free.
+
+    Written as xc^3/(3d) + y^2 + d*y with xc = clip(x, 0, d), y = relu(x - d):
+    for x >= d that is d^2/3 + y^2 + d y = x^2 - d x + d^2/3. Pass
+    ``tf.maximum`` / ``tf.minimum`` to evaluate it in TF (autodiff gives the
+    exact piecewise first and second derivatives).
+    """
+    xc = minimum(maximum(x, 0.0), delta)
+    y = maximum(x - delta, 0.0)
+    return xc * xc * xc / (3.0 * delta) + y * y + delta * y
 
 
 def _parse_margin(value):
@@ -455,17 +535,23 @@ class Condition:
     penalty).
     """
 
-    def __init__(self, label, names, coeff, bound):
+    def __init__(self, label, names, coeff, bound, scale=None):
         self.label = label
         self.names = tuple(names)
         self.coeff = coeff
         self.bound = bound
+        # NP exponent per unit of coeff at b_T = bmax (None: no constant
+        # scale, e.g. the tanh_6 discriminants). Only smooth=c2 reads it.
+        self.scale = scale
 
     def value(self, values, relu2):
         return self.coeff(values, relu2)
 
-    def penalty(self, values, relu2):
-        return relu2(self.bound - self.value(values, relu2))
+    def penalty(self, values, relu2, outer=None):
+        """``outer(bound - coeff)``; ``outer`` defaults to ``relu2``."""
+        return (relu2 if outer is None else outer)(
+            self.bound - self.value(values, relu2)
+        )
 
     def __repr__(self):
         return f"Condition({self.label!r} >= {self.bound:g})"
@@ -478,8 +564,16 @@ def damping_conditions(
     smallb=True,
     margin=NP_DAMPING_MARGIN,
     floor=LAMBDA_INF_FLOOR,
+    bmax=NP_WALL_BMAX,
+    lambda_inf_ref=1.0,
 ):
     """Every damping condition for the two resolved forms; see the module docstring.
+
+    Each condition also carries its ``scale`` -- the NP exponent per unit of its
+    coeff at b_T = ``bmax`` (CS: gamma_nu ~ -P(b^2); TMD: ln f^NP ~ -2 b^2 Q(b^2)
+    in the unsaturated limit; the cubic is divided by 3 lambda_inf^2, taken at
+    ``lambda_inf_ref``, its held value in every fit so far). Only ``smooth=c2``
+    reads it, to turn the normalised ramp width into each condition's raw units.
 
     ``ymax`` is the binding |Y| (:func:`_binding_absY`). The TMD conditions are
     emitted twice, at Y = 0 and Y = ymax, because L2 is monotonic in Y^2 and so
@@ -489,6 +583,7 @@ def damping_conditions(
     interior discriminants (always 0); callers validate it (``_parse_margin``).
     """
     conds = []
+    b2 = float(bmax) ** 2
 
     # ---- CS side: P(u) = l2nu*u + l4nu*u^2 + l6nu*u^3 >= 0 for all u >= 0.
     conds.append(
@@ -497,6 +592,7 @@ def damping_conditions(
             ("lambda_inf_nu",),
             lambda v, r: v["lambda_inf_nu"],
             floor,
+            scale=1.0,  # gamma_nu -> -lambda_inf_nu at large b
         )
     )
     if np_model_nu == "tanh_2":
@@ -506,6 +602,7 @@ def damping_conditions(
                 ("lambda4_nu",),
                 lambda v, r: v["lambda4_nu"],
                 margin,
+                scale=b2 * b2,
             )
         )
     else:  # tanh_6 -- lambda6_nu exists only in this vocabulary
@@ -515,6 +612,7 @@ def damping_conditions(
                 ("lambda6_nu",),
                 lambda v, r: v["lambda6_nu"],
                 margin,
+                scale=b2 * b2 * b2,
             )
         )
         # Interior: lambda4_nu >= 0 OR lambda4_nu^2 <= 4*l2nu*l6nu. Self-gating
@@ -536,6 +634,7 @@ def damping_conditions(
                 ("lambda2_nu",),
                 lambda v, r: v["lambda2_nu"],
                 margin,
+                scale=b2,
             )
         )
 
@@ -549,6 +648,7 @@ def damping_conditions(
             ("lambda_inf",),
             lambda v, r: v["lambda_inf"],
             floor,
+            scale=2.0 * float(bmax),  # ln f^NP -> -2 lambda_inf b at large b
         )
     )
 
@@ -569,6 +669,7 @@ def damping_conditions(
                     ("lambda2", "delta_lambda2"),
                     lambda v, r, y_sq=y_sq: _l2Y(v, y_sq),
                     margin,
+                    scale=2.0 * b2,
                 )
             )
         if np_model == "tanh_2":
@@ -578,6 +679,7 @@ def damping_conditions(
                     ("lambda_inf", "lambda2", "lambda4", "delta_lambda2"),
                     lambda v, r, y_sq=y_sq: _cubic(v, y_sq),
                     margin,
+                    scale=2.0 * b2 * b2 / (3.0 * float(lambda_inf_ref) ** 2),
                 )
             )
         else:  # tanh_6
@@ -587,6 +689,7 @@ def damping_conditions(
                     ("lambda6",),
                     lambda v, r: v["lambda6"],
                     margin,
+                    scale=2.0 * b2 * b2 * b2,
                 )
             )
             # Interior: B >= 0 OR B^2 <= 4*L2*lambda6. In cubic space:
@@ -680,6 +783,16 @@ def _make_mapping_class():
                            5e-3 before 2026-10-01). Finite and >= 0. The
                            lambda_inf floors, the tanh_6 interior discriminants
                            and the held-lambda drop check never use it.
+            smooth=<relu2|c2>
+                           the penalty shape (default relu2, the original C^1
+                           wall). c2: the curvature-continuous ramp of the
+                           module docstring, which removes trust-krylov's
+                           face-crossing limit cycle.
+            delta=<float>  c2 only: the ramp width in units of the NP exponent
+                           at b_T = bmax (default NP_WALL_C2_DELTA = 1e-3),
+                           converted per condition to its raw units.
+            bmax=<float>   c2 only: the b_T [GeV^-1] that normalisation refers
+                           to (default NP_WALL_BMAX = 12.6).
 
         The NP forms and the lambda anchors are derived from the card's recorded
         theory correction (see the module docstring); nothing on the -r line
@@ -687,22 +800,42 @@ def _make_mapping_class():
         """
 
         def __init__(
-            self, indata, key, smallb=True, ymax=None, margin=NP_DAMPING_MARGIN
+            self,
+            indata,
+            key,
+            smallb=True,
+            ymax=None,
+            margin=NP_DAMPING_MARGIN,
+            smooth=NP_WALL_SMOOTH,
+            delta=None,
+            bmax=None,
         ):
             super().__init__(indata, key)
             self.indata = indata
             self.smallb = bool(smallb)
             self.ymax = None if ymax is None else float(ymax)
             self.margin = _parse_margin(margin)
+            self.smooth = _parse_smooth(smooth)
+            if self.smooth != "c2" and (delta is not None or bmax is not None):
+                raise ValueError(
+                    "NPDampingMapping: delta= and bmax= set the C^2 ramp and "
+                    "need smooth=c2; with the relu2 wall they would be ignored."
+                )
+            self.delta = (
+                NP_WALL_C2_DELTA if delta is None else _parse_positive(delta, "delta")
+            )
+            self.bmax = NP_WALL_BMAX if bmax is None else _parse_positive(bmax, "bmax")
 
         @classmethod
         def parse_args(cls, indata, *args):
             smallb, ymax, margin = True, None, None
+            smooth, delta, bmax = None, None, None
             for a in args:
                 if "=" not in a:
                     raise ValueError(
                         f"NPDampingMapping: args are 'smallb=<0|1>', "
-                        f"'ymax=<float>' and 'margin=<float>', got '{a}'"
+                        f"'ymax=<float>', 'margin=<float>', 'smooth=<relu2|c2>', "
+                        f"'delta=<float>' and 'bmax=<float>', got '{a}'"
                     )
                 k, v = a.split("=", 1)
                 k = k.strip()
@@ -712,16 +845,26 @@ def _make_mapping_class():
                     ymax = float(v)
                 elif k == "margin":
                     margin = _parse_margin(v)
+                elif k == "smooth":
+                    smooth = _parse_smooth(v)
+                elif k == "delta":
+                    delta = _parse_positive(v, "delta")
+                elif k == "bmax":
+                    bmax = _parse_positive(v, "bmax")
                 else:
                     raise ValueError(
                         f"NPDampingMapping: unknown key '{k}'; only 'smallb', "
-                        "'ymax' and 'margin' are supported (the lambda_inf floor "
-                        "is a fixed module constant)."
+                        "'ymax', 'margin', 'smooth', 'delta' and 'bmax' are "
+                        "supported (the lambda_inf floor is a fixed module "
+                        "constant)."
                     )
             key = (
                 f"{cls.__name__} smallb={int(smallb)}"
                 + (f" ymax={ymax:g}" if ymax is not None else "")
                 + (f" margin={margin:g}" if margin is not None else "")
+                + (f" smooth={smooth}" if smooth is not None else "")
+                + (f" delta={delta:g}" if delta is not None else "")
+                + (f" bmax={bmax:g}" if bmax is not None else "")
             )
             return cls(
                 indata,
@@ -729,6 +872,9 @@ def _make_mapping_class():
                 smallb=smallb,
                 ymax=ymax,
                 margin=NP_DAMPING_MARGIN if margin is None else margin,
+                smooth=NP_WALL_SMOOTH if smooth is None else smooth,
+                delta=delta,
+                bmax=bmax,
             )
 
     return NPDampingMapping
@@ -751,10 +897,14 @@ def _make_regularizer_class():
             self.enforce_small_b = bool(getattr(mapping, "smallb", True))
             self.margin = _parse_margin(getattr(mapping, "margin", NP_DAMPING_MARGIN))
             self.floor = LAMBDA_INF_FLOOR
+            self.smooth = _parse_smooth(getattr(mapping, "smooth", NP_WALL_SMOOTH))
+            self.delta = float(getattr(mapping, "delta", NP_WALL_C2_DELTA))
+            self.bmax = float(getattr(mapping, "bmax", NP_WALL_BMAX))
 
             self.inputs = resolve_wall_inputs(
                 self.indata, ymax=getattr(mapping, "ymax", None)
             )
+            linf_ref = self.inputs["anchors"].get("lambda_inf")
             self.conditions = damping_conditions(
                 self.inputs["np_model"],
                 self.inputs["np_model_nu"],
@@ -762,6 +912,8 @@ def _make_regularizer_class():
                 smallb=self.enforce_small_b,
                 margin=self.margin,
                 floor=self.floor,
+                bmax=self.bmax,
+                lambda_inf_ref=1.0 if linf_ref is None else float(linf_ref),
             )
             print(
                 "[NPDampingWall] forms from the theory correction "
@@ -770,8 +922,15 @@ def _make_regularizer_class():
                 f"{self.inputs['np_model_nu']}. Binding |Y| = "
                 f"{self.inputs['ymax']:g} from {self.inputs['ymax_source']}. "
                 f"smallb={int(self.enforce_small_b)}, "
-                f"margin={self.margin:g}, lambda_inf floor={self.floor:g}. "
-                f"{len(self.conditions)} condition(s).",
+                f"margin={self.margin:g}, lambda_inf floor={self.floor:g}, "
+                f"smooth={self.smooth}"
+                + (
+                    f" (delta={self.delta:g} in the NP exponent at "
+                    f"b_T={self.bmax:g} GeV^-1)"
+                    if self.smooth == "c2"
+                    else ""
+                )
+                + f". {len(self.conditions)} condition(s).",
                 flush=True,
             )
             # theta -> physical, printed in full: this is the mapping the whole
@@ -808,6 +967,21 @@ def _make_regularizer_class():
             self._relu2_tf = lambda x: tf.square(
                 tf.maximum(tf.constant(0.0, dtype=self.dtype), x)
             )
+            # per-condition C^2 ramps, built for the ACTIVE conditions in
+            # set_expectations (None: the plain relu2 wall)
+            self._outer = []
+
+        def _c2_outer(self, cond):
+            """The C^2 ramp for one condition, its width in raw units."""
+            if cond.scale is None:
+                raise NotImplementedError(
+                    f"NPDampingWall smooth=c2: the condition '{cond.label}' has "
+                    "no constant physical scale (a tanh_6 interior "
+                    "discriminant), so its ramp width cannot be set in physical "
+                    "units. Use smooth=relu2 for this form."
+                )
+            d = float(self.delta / cond.scale)
+            return d, lambda x: c2_ramp(x, d, maximum=tf.maximum, minimum=tf.minimum)
 
         def set_expectations(self, initial_params, initial_observables, parms=None):
             names = np.asarray(parms).astype(str) if parms is not None else None
@@ -867,6 +1041,22 @@ def _make_regularizer_class():
                         "or float the parameter."
                     )
                 dropped.append((cond.label, val))
+            self._outer = [None] * len(self._active)
+            if self.smooth == "c2":
+                lines = []
+                for i, cond in enumerate(self._active):
+                    d, fn = self._c2_outer(cond)
+                    self._outer[i] = fn
+                    lines.append(
+                        f"{cond.label}: scale {cond.scale:.4g} per unit, ramp "
+                        f"width {d:.3g} raw, extra overshoot <= d/2 = {d / 2:.3g} "
+                        f"raw = {self.delta / 2:g} in the exponent at b_max"
+                    )
+                print(
+                    "[NPDampingWall] C^2 ramp per active condition:\n  "
+                    + "\n  ".join(lines),
+                    flush=True,
+                )
             print(
                 f"[NPDampingWall] armed on {len(self._active)} of "
                 f"{len(self.conditions)} condition(s) at margin="
@@ -894,7 +1084,16 @@ def _make_regularizer_class():
 
         def compute_nll_penalty(self, params, observables):
             values = self._physical(params)
-            return tf.add_n([c.penalty(values, self._relu2_tf) for c in self._active])
+            if self.smooth != "c2":
+                return tf.add_n(
+                    [c.penalty(values, self._relu2_tf) for c in self._active]
+                )
+            return tf.add_n(
+                [
+                    c.penalty(values, self._relu2_tf, outer=fn)
+                    for c, fn in zip(self._active, self._outer)
+                ]
+            )
 
         def constraint_spec(self, params, observables):
             """The wall as HARD inequality constraints, ``values >= bounds``.
