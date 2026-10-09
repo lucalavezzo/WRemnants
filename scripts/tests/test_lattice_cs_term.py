@@ -6,7 +6,9 @@ given to exercise the bitwise snapshot check against real rules.
 
     python scripts/tests/test_lattice_cs_term.py [--conf <runcard>] [--cache <small cache.npz>]
 
-  1. the data file holds exactly the per-ensemble ASWZ points and block covariance of the phase-3 inputs file;
+  1. the data file is the ASWZ per-ensemble layout of its .json provenance (21 points, 6/7/8 per ensemble at
+     a = 0.15/0.12/0.09 fm, b_T = k a, mu = 2 GeV), with a symmetric, positive-definite covariance that is block-diagonal
+     across ensembles;
   2. the stat-only lattice-only fit on SCETlib's kernel converges (gradient ~ 0) and the J-mapped systematics
      leave its minimum unchanged (Woodbury);
   3. the term's chi2 == the explicit k1 fit of the same residuals (k1 floated by least squares);
@@ -22,22 +24,30 @@ given to exercise the bitwise snapshot check against real rules.
      exactly zero; lambda gradient == FD; the load-time reference is the frozen one;
   9. n_f-scheme alternatives (nfscheme / nfswitch / nfmatch): the shift == the explicit gamma_nu_points composition,
      bitwise; the evolve shifts are flat in b_T; the old-table conventions (n_f = 4 evolution 1 -> 2 GeV with alpha_s^(4)
-     from m_b; whole kernel n_f = 4 from m_b) agree with the shipped exact-RGE, 3-loop-decoupled numpy tables of
-     lattice_aswz_inputs.npz within 6 % (analytic vs exact RGE, identification vs decoupling).
+     from m_b; whole kernel n_f = 4 from m_b) agree with the exact-RGE, 3-loop-decoupled numpy tables of the removed
+     table-based term (lattice_aswz_inputs.npz, read from git history at 3ef3efb9; skipped without git) within 6 %
+     (analytic vs exact RGE, identification vs decoupling).
 Exits 1 on any failure."""
 
 import argparse
+import io
 import os
+import subprocess
 import sys
 import types
 
 import numpy as np
 
 CONF = (
-    "/ceph/submit/data/group/cms/store/user/lavezzo/alphaS/ad_scetlib_caches/"
+    "/ceph/submit/data/group/cms/store/user/lavezzo/alphaS/scetlib_ad_caches/"
     "pdf62_y35_260921_y25/cache.conf"
 )
 FAIL = []
+# the removed table-based term's inputs (exact-RGE numpy tables), kept in git history only
+OLD_TABLES = (
+    "3ef3efb9",
+    "wremnants/postprocessing/scetlib_ad/data/lattice_aswz_inputs.npz",
+)
 
 
 def check(name, ok, msg=""):
@@ -142,20 +152,24 @@ def main():
     T = term(syst="Jnf+Jbt", tau=8.0, rules=rules)
     c = T.core
 
-    old = np.load(
-        os.path.join(os.path.dirname(LT.__file__), "data", "lattice_aswz_inputs.npz")
-    )
+    d = np.load(c.data_path)
+    ens = np.asarray(d["ens"])
+    k = np.concatenate([np.arange(1, n + 1) for n in (6, 7, 8)])
+    blk = ens[:, None] == ens[None, :]
+    cs = c.cov_stat
     check(
-        "1. data == phase-3 inputs (points, covariance)",
-        all(
-            np.array_equal(getattr(c, a), old[b])
-            for a, b in (
-                ("b_fm", "b_fm"),
-                ("a_fm", "a_fm"),
-                ("y", "y"),
-                ("cov_stat", "cov_stat"),
-            )
-        ),
+        "1. data file: ASWZ layout (21 points, 6/7/8, a, b_T = k a, mu), covariance",
+        len(c.y) == 21
+        and list(np.bincount(ens)) == [6, 7, 8]
+        and np.array_equal(np.unique(c.a_fm[ens == 0]), [0.15])
+        and np.array_equal(np.unique(c.a_fm[ens == 1]), [0.12])
+        and np.array_equal(np.unique(c.a_fm[ens == 2]), [0.09])
+        and np.allclose(c.b_fm, k * c.a_fm, rtol=0, atol=1e-12)
+        and c.mu == 2.0
+        and abs(c.fm_to_gevinv * 0.1973269804 - 1) < 1e-9
+        and np.array_equal(cs, cs.T)
+        and bool(np.all(cs[~blk] == 0.0))
+        and bool(np.all(np.linalg.eigvalsh(cs) > 0)),
     )
     fnom = c.fit_nominal
     check(
@@ -394,20 +408,39 @@ def main():
         nfmatch=MB,
         nfscheme="full",
     )
-    tab_v2 = old["pert_nf5_mu1match"] - old["pert"]
-    tab_v3 = old["pert_nf4"] - old["pert"]
-    r2 = float(np.max(np.abs(T118.core.nf_shift / tab_v2 - 1)))
-    r3 = float(np.max(np.abs(T118f.core.nf_shift - tab_v3)) / np.max(np.abs(tab_v3)))
-    check(
-        "9. V2 vs exact-RGE decoupled numpy table (alpha_s 0.118)",
-        r2 < 0.06,
-        f"max rel {r2:.3f}",
-    )
-    check(
-        "9. V3 vs exact-RGE decoupled numpy table (alpha_s 0.118)",
-        r3 < 0.06,
-        f"max rel (to max|shift|) {r3:.3f}",
-    )
+    try:
+        blob = subprocess.run(
+            [
+                "git",
+                "-C",
+                os.path.dirname(os.path.abspath(LT.__file__)),
+                "show",
+                ":".join(OLD_TABLES),
+            ],
+            capture_output=True,
+            check=True,
+        ).stdout
+        old = np.load(io.BytesIO(blob))
+    except (OSError, subprocess.CalledProcessError, ValueError) as e:
+        old = None
+        print(f"[SKIP] 9. exact-RGE table comparison: no {':'.join(OLD_TABLES)} ({e})")
+    if old is not None:
+        tab_v2 = old["pert_nf5_mu1match"] - old["pert"]
+        tab_v3 = old["pert_nf4"] - old["pert"]
+        r2 = float(np.max(np.abs(T118.core.nf_shift / tab_v2 - 1)))
+        r3 = float(
+            np.max(np.abs(T118f.core.nf_shift - tab_v3)) / np.max(np.abs(tab_v3))
+        )
+        check(
+            "9. V2 vs exact-RGE decoupled numpy table (alpha_s 0.118)",
+            r2 < 0.06,
+            f"max rel {r2:.3f}",
+        )
+        check(
+            "9. V3 vs exact-RGE decoupled numpy table (alpha_s 0.118)",
+            r3 < 0.06,
+            f"max rel (to max|shift|) {r3:.3f}",
+        )
 
     print("ALL PASS" if not FAIL else f"FAILED: {FAIL}")
     return 1 if FAIL else 0

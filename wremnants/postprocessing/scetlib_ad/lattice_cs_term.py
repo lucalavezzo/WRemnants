@@ -4,8 +4,8 @@ Adds 1/2 * (chi2_lat - offset) to the NLL, where
 
     chi2_lat = min_k1  r^T C^-1 r ,     r_i = gamma_zeta(b_i, mu = 2 GeV; p_full) + k1 a_i / b_i - y_i
 
-over the 21 ASWZ per-ensemble lattice points (arXiv:2402.06725). The difference to ``lattice_cs_chi2.LatticeCSChi2``
-(the table-based term, kept as a validation reference) is where gamma_zeta comes from:
+over the 21 ASWZ per-ensemble lattice points (arXiv:2402.06725). The difference to the earlier table-based term
+(``lattice_cs_chi2.LatticeCSChi2``, now removed) is where gamma_zeta comes from:
 
 * gamma_zeta = gamma_nu / 2 is SCETlib's own ``ad::gamma_nu_resummed`` -- the function the cross section's AD kernel
   calls for the beam and soft rapidity evolution -- through ``DrellYan.gamma_nu_points`` and
@@ -66,7 +66,7 @@ composite layout by running the composite class's own ``compute`` on recorders (
 follows the composite's permutation instead of re-deriving it. Anything else is refused.
 
 THE exp(2 tau) COMPENSATION: rabbit multiplies every regularizer penalty by exp(2 tau); this term divides it back out
-with the live ``fitter.tau`` (found on the call stack at ``set_expectations``), as ``LatticeCSChi2`` does.
+with the live ``fitter.tau`` (found on the call stack at ``set_expectations``).
 
 BLINDING: nothing evaluated at the live parameter vector is printed, logged or raised (gamma_zeta at the points, chi2,
 k1_hat, residuals, derivatives). Only load-time quantities at the public anchor are printed.
