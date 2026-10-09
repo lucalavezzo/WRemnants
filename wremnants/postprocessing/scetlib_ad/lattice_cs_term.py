@@ -11,10 +11,12 @@ over the 21 ASWZ per-ensemble lattice points (arXiv:2402.06725). The difference 
   calls for the beam and soft rapidity evolution -- through ``DrellYan.gamma_nu_points`` and
   ``scetlib_tf.ScetlibGammaNuTF`` (scetlib-cms branch ``gamma-nu-points``). Perturbative AND NP part, value, gradient
   and Hessian exact (clad), at every step.
-* It is evaluated at ``p_full = SCETlibADParamModel.scetlib_full_vector_tf(params)``: the SAME tensor the cross section
-  is evaluated at. alpha_s, the CS-kernel TNPs (tnp_gamma_cusp, tnp_gamma_nu) and the CS NP lambdas are therefore
-  exactly what the Z prediction sees, in the physical (offset-applied) frame rabbit hands the model, never the blinded
-  internal ``Fitter.x``, and through one theta -> physical map (no second implementation of it).
+* Its fitted inputs come from ``p_full = SCETlibADParamModel.scetlib_full_vector_tf(params)``: the SAME tensor the
+  cross section is evaluated at, in the physical (offset-applied) frame rabbit hands the model, never the blinded
+  internal ``Fitter.x``, and through one theta -> physical map (no second implementation of it). With the default
+  ``pert=frozen`` only the CS NP lambdas are taken from it (alpha_s and the CS TNPs held at a fixed reference); with
+  ``pert=live`` alpha_s, the CS-kernel TNPs (tnp_gamma_cusp, tnp_gamma_nu) and the CS NP lambdas are all exactly what
+  the Z prediction sees. See PERTURBATIVE PART.
 * The kernel's coefficients are a snapshot of the loaded calculation's, checked BITWISE against the coefficients stored
   in the first loaded cache rule (``gamma_nu_snapshot_status() == 1``). Hence the same RGE as the cache: SCETlib's
   ANALYTIC running and evolution (the AD kernel has no other), where the old table used the exact RGE (<= 1.9e-3 in
@@ -25,51 +27,75 @@ k1 (lattice-spacing artefact, k1 a/b_T) is PROFILED ANALYTICALLY: chi2 = r0^T M 
 W = C^-1, v = a/b, r0 = r(k1 = 0). Identical to a free k1 parameter (a rabbit regularizer cannot own parameters).
 
 Covariance C = C_stat + sum_g delta_g delta_g^T (each delta_g a point shift = a profiled unit-Gaussian nuisance), all
-computed AT LOAD from SCETlib, at the anchor (alpha_s, TNPs and lambda_inf_nu of the param model's anchor), with
-lattice-only refits of (lambda2_nu, lambda4_nu) on the stat covariance, k1 profiled:
+computed AT LOAD from SCETlib, at the load-time reference (see PERTURBATIVE PART), with lattice-only refits of
+(lambda2_nu, lambda4_nu) on the stat covariance, k1 profiled:
 
     Jnf        n_f scheme. Alternative kernel (``gamma_nu_points(nf=4, mu_match=nfmatch)``: n_f = 4 in beta, cusp and
                boundary, alpha_s^(4)(nfmatch) := alpha_s^(5)(nfmatch), the coupling IDENTIFIED at nfmatch):
-                 nfscheme=evolve (default): our n_f = 5 kernel at mu = nfswitch, evolved to 2 GeV with n_f = 4,
-                   alt = z5(nfswitch) + [z4(2 GeV) - z4(nfswitch)]; nfswitch defaults to nfmatch (default 1 GeV), the
-                   SCETlib-native "n_f identified at 1 GeV". nfswitch=1 nfmatch=4.18: the old table's convention
-                   (n_f = 4 evolution 1 -> 2 GeV with alpha_s^(4) from m_b(m_b), identified instead of decoupled).
-                 nfscheme=full: the whole kernel in n_f = 4 (boundary at mu0 and evolution to 2 GeV), alt = z4(2 GeV);
-                   with nfmatch=4.18 that is "n_f = 4 below m_b, coupling identified at m_b(m_b)".
+                 nfscheme=full (default): the whole kernel in n_f = 4 (boundary at mu0 and evolution to 2 GeV),
+                   alt = z4(2 GeV); with nfmatch=4.18 (default) that is "n_f = 4 below m_b, coupling identified at
+                   m_b(m_b)".
+                 nfscheme=evolve: our n_f = 5 kernel at mu = nfswitch, evolved to 2 GeV with n_f = 4,
+                   alt = z5(nfswitch) + [z4(2 GeV) - z4(nfswitch)]; nfswitch defaults to nfmatch. nfmatch=1: the
+                   SCETlib-native "n_f identified at 1 GeV" (LATFROZ_V1); nfswitch=1 nfmatch=4.18: the old table's
+                   convention (n_f = 4 evolution 1 -> 2 GeV with alpha_s^(4) from m_b(m_b), identified instead of
+                   decoupled; LATFROZ_V2). nfswitch needs nfscheme=evolve given explicitly.
                The shift alt - nominal is computed once at the load-time reference (the NP part cancels exactly).
                d = lambda_hat(alt) - lambda_hat(nominal), delta = J_NP d.
-    Jbt        b_T window: d = lambda_hat(b_T >= 0.2 fm) - lambda_hat(all), delta = J_NP d.
+    Jbt        b_T window: d = lambda_hat(b_T >= 0.2 fm) - lambda_hat(all), delta = J_NP d. Opt-in only
+               (``syst=Jnf+Jbt``): dropped from the default by Luca 2026-10-08.
     direct_nf  the n_f group as the direct point shift alt - nominal (instead of Jnf).
     none       stat only.
-    default    ``Jnf+Jbt`` (Luca 2026-10-07: b_T window kept until the theorists answer; its impact reported apart).
+    default    ``Jnf``.
 
 J_NP is SCETlib's Jacobian d gamma_zeta / d(lambda2_nu, lambda4_nu) at the nominal lattice-only fit. No mu0 variation
-and no k-form (Luca 2026-10-06/07: missing higher orders are the TNPs' job, and they are live in the kernel; k1 a/b_T is
-the lattice authors' prescription).
+and no k-form (Luca 2026-10-06/07: missing higher orders are the TNPs' job; k1 a/b_T is the lattice authors'
+prescription).
 
-``offset=min`` (default): the lattice-only chi2_min at the anchor with the final covariance, so the term is
-1/2 Delta chi2. ``ydata=asimov``: y = gamma_zeta(anchor) + k1asimov a/b (closure; use ``offset=0``).
+``offset=min`` (default): the lattice-only chi2_min at the reference with the final covariance, so the term is
+1/2 Delta chi2. ``ydata=asimov``: y = gamma_zeta(reference) + k1asimov a/b (closure; use ``offset=0``).
 
-PERTURBATIVE PART: ``pert=live`` (default) evaluates the kernel at p_full, so alpha_s and the CS TNPs move the lattice
-comparison exactly as they move the cross section. ``pert=frozen alphas_frozen=0.1168``: the kernel compared with the
-lattice points is evaluated at a FIXED reference -- the param model's anchor with alpha_s(mZ) := alphas_frozen (default
-0.1168, the value the ASWZ matching corresponds to: alpha_s^(4)(2 GeV) = 0.293) and the CS TNPs (tnp_gamma_cusp,
-tnp_gamma_nu) := 0 -- except the CS NP lambdas (np_gnu_lambda2, np_gnu_lambda4), which come from p_full. Every other
-entry, lambda_inf_nu included, stays at that reference. The lattice then constrains only the CS NP parameters: its
-gradient and Hessian with respect to alpha_s and the TNPs are exactly zero, and all load-time quantities (n_f shift,
-refits, J_NP, covariance, offset) are computed at that reference. The cross section is untouched (alpha_s and the TNPs
-float there as usual). The term's value then depends on public parameters only and may be printed.
+PERTURBATIVE PART: ``pert=frozen alphas_frozen=0.1168`` (default): the kernel compared with the lattice points is
+evaluated at a FIXED reference -- the param model's anchor with alpha_s(mZ) := alphas_frozen (default 0.1168, the
+value the ASWZ matching corresponds to: alpha_s^(4)(2 GeV) = 0.293) and the CS TNPs (tnp_gamma_cusp, tnp_gamma_nu)
+:= 0 -- except the CS NP lambdas (np_gnu_lambda2, np_gnu_lambda4), which come from p_full. Every other entry,
+lambda_inf_nu included, stays at that reference. The lattice then constrains only the CS NP parameters: its gradient
+and Hessian with respect to alpha_s and the TNPs are exactly zero, and all load-time quantities (n_f shift, refits,
+J_NP, covariance, offset) are computed at that reference. The cross section is untouched (alpha_s and the TNPs float
+there as usual). The term's value then depends on public parameters only and may be printed. ``pert=live`` (opt-in)
+evaluates the kernel at p_full, so alpha_s and the CS TNPs move the lattice comparison exactly as they move the cross
+section; its load-time reference is the param model's anchor.
+
+DEFAULTS (Luca 2026-10-09): a bare ``-r ...LatticeCSTerm ...LatticeCSTermMapping`` is the LATFROZ_V3 nominal,
+
+    pert=frozen alphas_frozen=0.1168 syst=Jnf nfmatch=4.18 nfscheme=full offset=min
+
+(WRemnantsHelpers studies/lattice-cs-kernel, task 261008-latfroz-nf-variants; the b_T window was dropped 2026-10-08,
+V3 chosen 2026-10-09). Everything else stays available as an explicit option.
+
+REPRODUCING OLDER FITS: commands written before 2026-10-09 relied on the old defaults pert=live syst=Jnf+Jbt
+nfmatch=1 nfscheme=evolve. To rerun one, add what it left out: the LATB5/LATB8/SAT* era (``syst=Jnf+Jbt
+offset=min``) needs ``pert=live nfmatch=1 nfscheme=evolve``; LATFROZ_V1 (``nfmatch=1.0``) and LATFROZ_V2
+(``nfmatch=4.18 nfswitch=1.0``) need ``nfscheme=evolve`` (V1 would otherwise silently become the full-n_f=4 scheme at
+1 GeV; V2 is refused). LATFROZ_V3's own command is unchanged by the new defaults.
+
+THE TABLE-BASED TERM ``lattice_cs_chi2.LatticeCSChi2`` and its inputs (``data/lattice_aswz_inputs.npz``) were removed
+in 1b3732bb (superseded by this term); ``git show 3ef3efb9`` has their last version.
 
 COMPOSITE MODELS (the saturated test): when the fitter's param model is a rabbit ``CompositeParamModel`` with exactly
 one SCETlibADParamModel among its direct submodels, the SCETlib submodel's own [poi | pou] vector is rebuilt from the
 composite layout by running the composite class's own ``compute`` on recorders (``submodel_vector``), so the term
 follows the composite's permutation instead of re-deriving it. Anything else is refused.
 
-THE exp(2 tau) COMPENSATION: rabbit multiplies every regularizer penalty by exp(2 tau); this term divides it back out
-with the live ``fitter.tau`` (found on the call stack at ``set_expectations``).
+THE exp(2 tau) COMPENSATION: rabbit multiplies every regularizer penalty by exp(2 tau) (tau = --regularizationStrength);
+this term divides it back out with the live ``fitter.tau``, found on the call stack at ``set_expectations``. If no
+fitter is found there and no ``tau=`` is on the -r line, arming FAILS: the penalty would otherwise go in unscaled and
+come out exp(2 tau) too strong (e^16 at tau = 8). Pass ``tau=<--regularizationStrength>`` explicitly then; offline /
+standalone evaluation (``param_model_override``, no fitter) must pass ``tau=`` too (``tau=0`` for the bare
+1/2 (chi2 - offset)).
 
 BLINDING: nothing evaluated at the live parameter vector is printed, logged or raised (gamma_zeta at the points, chi2,
-k1_hat, residuals, derivatives). Only load-time quantities at the public anchor are printed.
+k1_hat, residuals, derivatives). Only load-time quantities at the public reference are printed.
 
 Invoke (composes with the wall; each on its own -r):
 
@@ -78,8 +104,9 @@ Invoke (composes with the wall; each on its own -r):
          wremnants.postprocessing.scetlib_ad.np_damping_wall.NPDampingMapping margin=0 \\
       -r wremnants.postprocessing.scetlib_ad.lattice_cs_term.LatticeCSTerm \\
          wremnants.postprocessing.scetlib_ad.lattice_cs_term.LatticeCSTermMapping \\
-         [syst=Jnf+Jbt|...] [nfmatch=1.0] [nfswitch=<GeV>] [nfscheme=evolve|full] [pert=live|frozen]
-         [alphas_frozen=0.1168] [offset=min|<float>] [ydata=lattice|asimov] [k1asimov=0.2] [data=<npz>]
+         [pert=frozen|live] [alphas_frozen=0.1168] [syst=Jnf|Jnf+Jbt|direct_nf|none] [nfmatch=4.18]
+         [nfscheme=full|evolve] [nfswitch=<GeV>] [offset=min|<float>] [ydata=lattice|asimov] [k1asimov=0.2]
+         [tau=<float>] [data=<npz>]
 
 Requires a SCETlib build with ``DrellYan.gamma_nu_points`` (scetlib-cms >= 6ab371a on branch gamma-nu-points).
 """
@@ -93,13 +120,17 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_DATA = os.path.join(_HERE, "data", "lattice_aswz_data.npz")
 MU_LATTICE = 2.0  # GeV: the ASWZ MSbar scale
 NF_ALT = 4  # the lattice's flavour number
-DEFAULT_NF_MATCH = 1.0  # GeV: alpha_s^(4) identified with alpha_s^(5) here
+DEFAULT_NF_MATCH = (
+    4.18  # GeV, m_b(m_b): alpha_s^(4) identified with alpha_s^(5) here (V3)
+)
 BT_WINDOW_FM = 0.2
-DEFAULT_SYST = "Jnf+Jbt"
+DEFAULT_SYST = "Jnf"  # the b_T window (Jbt) is opt-in since 2026-10-08
 SYST_COMPONENTS = ("Jnf", "Jbt", "direct_nf", "none")
 FIT_LAMBDAS = ("np_gnu_lambda2", "np_gnu_lambda4")  # SCETlib names refit at load
 NF_SCHEMES = ("evolve", "full")
+DEFAULT_NF_SCHEME = "full"  # the whole kernel in n_f = 4 (V3)
 PERT_MODES = ("live", "frozen")
+DEFAULT_PERT = "frozen"  # the lattice constrains the CS NP lambdas only (V3)
 DEFAULT_ALPHAS_FROZEN = (
     0.1168  # ASWZ: alpha_s^(4)(2 GeV) = 0.293 <-> alpha_s(mZ) = 0.1168 (m_b decoupling)
 )
@@ -184,7 +215,7 @@ class LatticeCSNativeCore:
         k1asimov=0.2,
         require_rules=True,
         nf_switch=None,
-        nf_scheme="evolve",
+        nf_scheme=DEFAULT_NF_SCHEME,
     ):
         ScetlibGammaNuTF = _import_gamma_nu_tf()
         d = np.load(data)
@@ -408,16 +439,17 @@ def _make_mapping_class():
             self.nfswitch = (
                 float(kw["nfswitch"]) if kw.get("nfswitch") is not None else None
             )
-            self.nfscheme = kw.get("nfscheme", "evolve")
+            self.nfscheme = kw.get("nfscheme", DEFAULT_NF_SCHEME)
             if self.nfscheme not in NF_SCHEMES:
                 raise ValueError(
                     f"LatticeCSTermMapping: nfscheme={self.nfscheme!r} ({'|'.join(NF_SCHEMES)})"
                 )
             if self.nfscheme == "full" and self.nfswitch is not None:
                 raise ValueError(
-                    "LatticeCSTermMapping: nfswitch has no meaning with nfscheme=full"
+                    "LatticeCSTermMapping: nfswitch has no meaning with nfscheme=full "
+                    "(the default); give nfscheme=evolve explicitly"
                 )
-            self.pert = kw.get("pert", "live")
+            self.pert = kw.get("pert", DEFAULT_PERT)
             if self.pert not in PERT_MODES:
                 raise ValueError(
                     f"LatticeCSTermMapping: pert={self.pert!r} ({'|'.join(PERT_MODES)})"
@@ -548,8 +580,8 @@ def _make_regularizer_class():
             self.k1asimov = float(getattr(mapping, "k1asimov", 0.2))
             self.nfmatch = float(getattr(mapping, "nfmatch", DEFAULT_NF_MATCH))
             self.nfswitch = getattr(mapping, "nfswitch", None)
-            self.nfscheme = getattr(mapping, "nfscheme", "evolve")
-            self.pert = getattr(mapping, "pert", "live")
+            self.nfscheme = getattr(mapping, "nfscheme", DEFAULT_NF_SCHEME)
+            self.pert = getattr(mapping, "pert", DEFAULT_PERT)
             self.alphas_frozen = float(
                 getattr(mapping, "alphas_frozen", DEFAULT_ALPHAS_FROZEN)
             )
@@ -665,6 +697,15 @@ def _make_regularizer_class():
                     raise ValueError(
                         "LatticeCSTerm: the SCETlib submodel's parameters are not where the layout puts them"
                     )
+            if fitter is None and self.tau_arg is None:
+                # without the live fitter.tau the penalty would go in unscaled, and rabbit's exp(2 tau) would make
+                # it exp(2 tau) too strong (e^16 at tau = 8): refuse rather than guess
+                raise ValueError(
+                    "LatticeCSTerm: no rabbit Fitter found on the call stack, so the live fitter.tau is unknown and "
+                    "the exp(2 tau) that rabbit multiplies every regularizer penalty by cannot be divided out. Pass "
+                    "tau=<the fit's --regularizationStrength> on the -r line (offline / standalone use: tau=0 for "
+                    "the unscaled 1/2 (chi2 - offset))."
+                )
             tau = fitter.tau if fitter is not None else None
             if tau is not None:
                 if (
@@ -678,11 +719,7 @@ def _make_regularizer_class():
                 src = f"fitter.tau (live variable, now {float(tau.numpy()):g})"
             else:
                 self._tau = None
-                src = (
-                    f"tau={self.tau_arg} from the -r line"
-                    if self.tau_arg is not None
-                    else "NONE (scale 1)"
-                )
+                src = f"tau={self.tau_arg} from the -r line"
             print(
                 f"[LatticeCSTerm] armed on {type(self._pm).__name__}"
                 + (

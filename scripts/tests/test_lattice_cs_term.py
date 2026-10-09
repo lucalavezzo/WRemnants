@@ -18,7 +18,11 @@ given to exercise the bitwise snapshot check against real rules.
   6. a rabbit CompositeParamModel (as the saturated test builds it), in both submodel orders: the term hands SCETlib
      exactly the vector the composite's own compute() hands the SCETlib submodel, and its chi2 equals the plain
      model's at the same physical point, bitwise; two SCETlib submodels are refused;
-  7. pert=live given explicitly == the default, bitwise (chi2, gradient, load-time numbers);
+  7. the bare default term == the explicit LATFROZ_V3 options (pert=frozen alphas_frozen=0.1168 syst=Jnf
+     nfmatch=4.18 nfscheme=full offset=min), bitwise: n_f shift, covariance, M, offset, reference, refits, and the
+     penalty's value, gradient and Hessian at a displaced point; its load-time numbers == those the LATFROZ_V3 fit
+     logged (WRemnantsHelpers studies/lattice-cs-kernel/261008-latfroz-nf-variants/logs/LATFROZ_V3.log);
+     checks 2-6 run on the old defaults given explicitly (pert=live syst=Jnf+Jbt nfmatch=1 nfscheme=evolve);
   8. pert=frozen: the kernel sees alpha_s = alphas_frozen and TNPs = 0 whatever the fit vector says (chi2 == the numpy
      chi2 at the frozen reference with the lambdas of p_full); gradient AND Hessian with respect to alpha_s and the TNP
      exactly zero; lambda gradient == FD; the load-time reference is the frozen one;
@@ -26,7 +30,9 @@ given to exercise the bitwise snapshot check against real rules.
      bitwise; the evolve shifts are flat in b_T; the old-table conventions (n_f = 4 evolution 1 -> 2 GeV with alpha_s^(4)
      from m_b; whole kernel n_f = 4 from m_b) agree with the exact-RGE, 3-loop-decoupled numpy tables of the removed
      table-based term (lattice_aswz_inputs.npz, read from git history at 3ef3efb9; skipped without git) within 6 %
-     (analytic vs exact RGE, identification vs decoupling).
+     (analytic vs exact RGE, identification vs decoupling);
+ 10. the mis-scale guard: with no fitter on the stack and no tau= the term refuses to arm (the penalty would go in
+     unscaled and rabbit's exp(2 tau) would make it e^(2 tau) too strong); tau=0 gives the bare 1/2 (chi2 - offset).
 Exits 1 on any failure."""
 
 import argparse
@@ -43,6 +49,25 @@ CONF = (
     "pdf62_y35_260921_y25/cache.conf"
 )
 FAIL = []
+# the pre-2026-10-09 defaults (LATB8 era), given explicitly where the checks exercise the live path
+OLD_DEFAULTS = dict(pert="live", syst="Jnf+Jbt", nfmatch=1.0, nfscheme="evolve")
+# the LATFROZ_V3 -r options (261008-latfroz-nf-variants/cmds/LATFROZ_V3.cmd), the defaults since 2026-10-09
+V3 = dict(
+    syst="Jnf",
+    offset="min",
+    pert="frozen",
+    alphas_frozen=0.1168,
+    nfmatch=4.18,
+    nfscheme="full",
+)
+# load-time numbers the LATFROZ_V3 fit printed (reference alpha_s 0.1168, TNPs 0)
+V3_LOG = dict(
+    dlam=[-0.016468738386292647, 0.0007696907729429249],
+    chi2min_alt=6.892003701755524,
+    shift_range=(-0.02754, 0.00253),
+    stat_lam=(0.18795, -0.006088),
+    chi2_min=6.682179,
+)
 # the removed table-based term's inputs (exact-RGE numpy tables), kept in git history only
 OLD_TABLES = (
     "3ef3efb9",
@@ -149,7 +174,7 @@ def main():
         return t
 
     rules = "require" if args.cache else "any"
-    T = term(syst="Jnf+Jbt", tau=8.0, rules=rules)
+    T = term(tau=8.0, rules=rules, **OLD_DEFAULTS)
     c = T.core
 
     d = np.load(c.data_path)
@@ -244,7 +269,7 @@ def main():
         xc[list(cnames).index("toynui")] = -1.3
         m = LT.LatticeCSTermMapping.parse_args(
             types.SimpleNamespace(channel_info={}, procs=[]),
-            "syst=Jnf+Jbt",
+            *[f"{k_}={v_}" for k_, v_ in OLD_DEFAULTS.items()],
             "tau=8.0",
             f"rules={rules}",
         )
@@ -275,18 +300,75 @@ def main():
     except ValueError:
         check("6. two SCETlib submodels refused", True)
 
-    # ---- 7. pert=live explicitly == default, bitwise
-    TL = term(syst="Jnf+Jbt", tau=8.0, rules=rules, pert="live")
-    xv = tf.Variable(th)
-    with tf.GradientTape() as tape:
-        pl = TL.compute_nll_penalty(xv, None)
-    gl = tape.gradient(pl, xv).numpy()
+    # ---- 7. the bare default == LATFROZ_V3, bitwise
+    TD = term(tau=8.0, rules=rules)
+    TV3 = term(tau=8.0, rules=rules, **V3)
+
+    def vgh(t):
+        xv = tf.Variable(th)
+        with tf.GradientTape() as t2:
+            with tf.GradientTape() as t1:
+                v = t.compute_nll_penalty(xv, None)
+            gv = t1.gradient(v, xv)
+        return float(v), gv.numpy(), t2.jacobian(gv, xv).numpy()
+
+    vD, gD, HD = vgh(TD)
+    vV, gV, HV = vgh(TV3)
+    cD, cV = TD.core, TV3.core
     check(
-        "7. pert=live explicit == default (chi2, gradient, offset, M), bitwise",
-        float(TL.chi2_tf(tf.constant(th))) == chi2_term
-        and np.array_equal(gl, g)
-        and TL.offset == T.offset
-        and np.array_equal(TL.core.M, c.M),
+        "7. default options resolve to V3",
+        (TD.pert, TD.syst, TD.alphas_frozen, TD.nfmatch, TD.nfscheme, TD.offset_arg)
+        == ("frozen", "Jnf", 0.1168, 4.18, "full", "min")
+        and TD.nfswitch is None
+        and cD.nf_switch == 4.18,
+    )
+    check(
+        "7. default == V3: n_f shift, cov, M, offset, reference, refits, bitwise",
+        np.array_equal(cD.nf_shift, cV.nf_shift)
+        and np.array_equal(cD.cov, cV.cov)
+        and np.array_equal(cD.M, cV.M)
+        and TD.offset == TV3.offset
+        and np.array_equal(cD.p_ref, cV.p_ref)
+        and np.array_equal(cD.fit_nominal["lam"], cV.fit_nominal["lam"])
+        and np.array_equal(cD.fit_final["lam"], cV.fit_final["lam"])
+        and cD.syst_info == cV.syst_info,
+    )
+    check(
+        "7. default == V3: penalty value, gradient, Hessian at a point, bitwise",
+        vD == vV and np.array_equal(gD, gV) and np.array_equal(HD, HV),
+        f"value {vD:.6e}",
+    )
+    sD = cD.summary()
+    dl = np.array(sD["syst_info"]["Jnf"]["dlam"])
+    rows = [
+        ("Jnf dlam", float(np.max(np.abs(dl - V3_LOG["dlam"]))), 1e-12),
+        (
+            "Jnf chi2min",
+            abs(sD["syst_info"]["Jnf"]["chi2min"] - V3_LOG["chi2min_alt"]),
+            1e-10,
+        ),
+        (
+            "shift range",
+            float(
+                np.max(np.abs(np.array(sD["nf_shift_range"]) - V3_LOG["shift_range"]))
+            ),
+            5e-6,
+        ),
+        (
+            "stat-only lambda",
+            float(
+                np.max(
+                    np.abs(np.array(sD["nominal_stat_fit"]["lam"]) - V3_LOG["stat_lam"])
+                )
+            ),
+            5e-6,
+        ),
+        ("chi2_min", abs(sD["chi2_min"] - V3_LOG["chi2_min"]), 5e-7),
+    ]
+    check(
+        "7. default load-time numbers == the LATFROZ_V3 fit's log (to its printed digits)",
+        all(d_ <= tol for _, d_, tol in rows),
+        "; ".join(f"{n_} {d_:.1e}" for n_, d_, _ in rows),
     )
 
     # ---- 8. pert=frozen
@@ -350,7 +432,7 @@ def main():
     relf = float(np.max(np.abs(gf[[1, 2]] - fdf) / np.max(np.abs(fdf))))
     check("8. frozen: lambda gradient == FD", relf < 1e-8, f"rel {relf:.1e}")
     try:
-        term(syst="Jnf", rules=rules, alphas_frozen=afz)
+        term(syst="Jnf", rules=rules, pert="live", alphas_frozen=afz)
         check("8. alphas_frozen without pert=frozen refused", False)
     except ValueError:
         check("8. alphas_frozen without pert=frozen refused", True)
@@ -365,11 +447,11 @@ def main():
     z5 = z(2.0)
     variants = {
         "V1 evolve, switch = match = 1 GeV": (
-            dict(nfmatch=1.0),
+            dict(nfmatch=1.0, nfscheme="evolve"),
             z(1.0) + z(2.0, 4, 1.0) - z(1.0, 4, 1.0) - z5,
         ),
         "V2 evolve, switch 1 GeV, match m_b": (
-            dict(nfmatch=MB, nfswitch=1.0),
+            dict(nfmatch=MB, nfswitch=1.0, nfscheme="evolve"),
             z(1.0) + z(2.0, 4, MB) - z(1.0, 4, MB) - z5,
         ),
         "V3 full n_f = 4, match m_b": (
@@ -377,12 +459,14 @@ def main():
             z(2.0, 4, MB) - z5,
         ),
         "V3lit evolve, switch = match = m_b": (
-            dict(nfmatch=MB),
+            dict(nfmatch=MB, nfscheme="evolve"),
             z(MB) + z(2.0, 4, MB) - z(MB, 4, MB) - z5,
         ),
     }
     for lab, (kw, ref) in variants.items():
-        Tv = term(syst="Jnf", rules=rules, pert="frozen", alphas_frozen=afz, **kw)
+        Tv = term(
+            syst="Jnf", rules=rules, tau=0.0, pert="frozen", alphas_frozen=afz, **kw
+        )
         check(
             f"9. {lab}: shift == explicit composition, bitwise",
             np.array_equal(Tv.core.nf_shift, ref),
@@ -395,14 +479,17 @@ def main():
     T118 = term(
         syst="Jnf",
         rules=rules,
+        tau=0.0,
         pert="frozen",
         alphas_frozen=0.118,
         nfmatch=MB,
         nfswitch=1.0,
+        nfscheme="evolve",
     )
     T118f = term(
         syst="Jnf",
         rules=rules,
+        tau=0.0,
         pert="frozen",
         alphas_frozen=0.118,
         nfmatch=MB,
@@ -441,6 +528,33 @@ def main():
             r3 < 0.06,
             f"max rel (to max|shift|) {r3:.3f}",
         )
+
+    try:
+        term(syst="Jnf", rules=rules, nfmatch=MB, nfswitch=1.0)
+        check("9. nfswitch with the default nfscheme=full refused", False)
+    except ValueError:
+        check("9. nfswitch with the default nfscheme=full refused", True)
+
+    # ---- 10. mis-scale guard: no fitter and no tau= -> refuse to arm
+    mg = LT.LatticeCSTermMapping.parse_args(
+        types.SimpleNamespace(channel_info={}, procs=[]), f"rules={rules}"
+    )
+    Tg = LT.LatticeCSTerm(mg, tf.float64)
+    Tg.param_model_override = PM()
+    try:
+        Tg.set_expectations(None, None, parms=PM.params)
+        check("10. no fitter, no tau= -> refused", False)
+    except ValueError as e:
+        check(
+            "10. no fitter, no tau= -> refused (message names tau=)",
+            "tau=" in str(e) and "regularizationStrength" in str(e),
+        )
+    T0 = term(tau=0.0, rules=rules)
+    v0 = float(T0.compute_nll_penalty(tf.constant(th), None))
+    check(
+        "10. tau=0 -> penalty == 1/2 (chi2 - offset), unscaled",
+        v0 == 0.5 * (float(T0.chi2_tf(tf.constant(th))) - T0.offset),
+    )
 
     print("ALL PASS" if not FAIL else f"FAILED: {FAIL}")
     return 1 if FAIL else 0
