@@ -21,7 +21,8 @@ over the 21 ASWZ per-ensemble lattice points (arXiv:2402.06725). The difference 
   in the first loaded cache rule (``gamma_nu_snapshot_status() == 1``). Hence the same RGE as the cache: SCETlib's
   ANALYTIC running and evolution (the AD kernel has no other), where the old table used the exact RGE (<= 1.9e-3 in
   gamma_zeta, -8.5 % in d gamma_zeta / d alpha_s on the plateau; 261007-lattice-term-design).
-* Only DATA ships: ``data/lattice_aswz_data.npz`` (points, b_T, a, ensembles, covariance, provenance in the .json).
+* Only DATA is read: ``lattice_aswz_data.npz`` (points, b_T, a, ensembles, covariance; provenance in the .json next
+  to it). It is NOT in this repository; see THE LATTICE DATA.
 
 k1 (lattice-spacing artefact, k1 a/b_T) is PROFILED ANALYTICALLY: chi2 = r0^T M r0, M = W - (W v)(W v)^T / (v^T W v),
 W = C^-1, v = a/b, r0 = r(k1 = 0). Identical to a free k1 parameter (a rabbit regularizer cannot own parameters).
@@ -79,6 +80,19 @@ offset=min``) needs ``pert=live nfmatch=1 nfscheme=evolve``; LATFROZ_V1 (``nfmat
 (``nfmatch=4.18 nfswitch=1.0``) need ``nfscheme=evolve`` (V1 would otherwise silently become the full-n_f=4 scheme at
 1 GeV; V2 is refused). LATFROZ_V3's own command is unchanged by the new defaults.
 
+THE LATTICE DATA are private files from the ASWZ authors (arXiv:2402.06725) and are not distributed: never commit
+them, or a copy or reformatting of them, to a repository. They live on the group data area, as a sibling of the NanoAOD
+directory that ``dataset_tools.getDataPath()`` returns (``WREMNANTS_DATA_PATH`` if set, else the per-host default; it
+points at the NanoAOD directory itself, and the lattice directory is its sibling):
+
+    <dirname(getDataPath())>/lattice/ASWZ2024/lattice_aswz_data.npz   (+ lattice_aswz_data.json, the provenance)
+    MIT:  /scratch/submit/cms/wmass/lattice/ASWZ2024/      (getDataPath() = /scratch/submit/cms/wmass/NanoAOD)
+    CERN: /scratch/shared/lattice/ASWZ2024/                (getDataPath() = /scratch/shared/NanoAOD)
+
+``author_files/`` in the same directory holds the authors' original CSVs the .npz was built from. ``data=<npz>`` on
+the -r line overrides the default path. A missing file is an error (there is no fallback copy); access is restricted
+to the analysis group, so ask for a copy rather than fetching one from elsewhere.
+
 THE TABLE-BASED TERM ``lattice_cs_chi2.LatticeCSChi2`` and its inputs (``data/lattice_aswz_inputs.npz``) were removed
 in 1b3732bb (superseded by this term); ``git show 3ef3efb9`` has their last version.
 
@@ -116,8 +130,8 @@ import os
 
 import numpy as np
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_DATA = os.path.join(_HERE, "data", "lattice_aswz_data.npz")
+LATTICE_SUBDIR = os.path.join("lattice", "ASWZ2024")
+LATTICE_FILE = "lattice_aswz_data.npz"
 MU_LATTICE = 2.0  # GeV: the ASWZ MSbar scale
 NF_ALT = 4  # the lattice's flavour number
 DEFAULT_NF_MATCH = (
@@ -152,6 +166,48 @@ _KEYS = (
     "alphas_frozen",
     "rules",
 )
+
+
+def default_data_path():
+    """``<parent of getDataPath()>/lattice/ASWZ2024/lattice_aswz_data.npz``: the lattice directory is a sibling of the
+    NanoAOD directory ``getDataPath()`` returns (``WREMNANTS_DATA_PATH`` or the per-host default).
+    """
+    # lazy: dataset_tools imports ROOT, XRootD and narf, which a fit that never arms this term should not pay for
+    from wremnants.production.datasets.dataset_tools import getDataPath
+
+    try:
+        nano = getDataPath()
+    except RuntimeError as e:
+        raise RuntimeError(
+            f"LatticeCSTerm: cannot locate the lattice data: {e} (WREMNANTS_DATA_PATH is the NanoAOD directory; the "
+            f"lattice data are expected at <its parent>/{LATTICE_SUBDIR}/{LATTICE_FILE}), or give data=<npz>"
+        ) from e
+    return os.path.join(
+        os.path.dirname(os.path.normpath(nano)), LATTICE_SUBDIR, LATTICE_FILE
+    )
+
+
+def resolve_data_path(data=None):
+    """The lattice .npz to read: ``data`` if given, else ``default_data_path()``. Raises FileNotFoundError, naming the
+    path, ``WREMNANTS_DATA_PATH`` and ``data=``, if it does not exist (the data are private and never in the repo).
+    """
+    explicit = data not in (None, "")
+    path = str(data) if explicit else default_data_path()
+    if not os.path.isfile(path):
+        origin = (
+            "given as data="
+            if explicit
+            else "the default <dirname(getDataPath())>/"
+            f"{LATTICE_SUBDIR}/{LATTICE_FILE}; WREMNANTS_DATA_PATH="
+            f"{os.environ.get('WREMNANTS_DATA_PATH', '<unset, per-host default>')}"
+        )
+        raise FileNotFoundError(
+            f"LatticeCSTerm: lattice data file not found: {path} ({origin}). The ASWZ lattice data are private author "
+            "files, not in the repository; they live on the group data area as a sibling of the NanoAOD directory "
+            f"(MIT: /scratch/submit/cms/wmass/{LATTICE_SUBDIR}/). Point WREMNANTS_DATA_PATH at a NanoAOD directory "
+            "whose parent holds lattice/ASWZ2024/, or pass data=<path to lattice_aswz_data.npz> on the -r line."
+        )
+    return path
 
 
 def frozen_reference(names, p_anchor, alphas_frozen):
@@ -208,7 +264,7 @@ class LatticeCSNativeCore:
         self,
         sing,
         p_ref,
-        data=DEFAULT_DATA,
+        data=None,
         syst=DEFAULT_SYST,
         nf_match=DEFAULT_NF_MATCH,
         ydata="lattice",
@@ -217,6 +273,7 @@ class LatticeCSNativeCore:
         nf_switch=None,
         nf_scheme=DEFAULT_NF_SCHEME,
     ):
+        data = resolve_data_path(data)
         ScetlibGammaNuTF = _import_gamma_nu_tf()
         d = np.load(data)
         self.data_path = data
@@ -424,7 +481,7 @@ def _make_mapping_class():
         def __init__(self, indata, key, **kw):
             super().__init__(indata, key)
             self.indata = indata
-            self.data = kw.get("data", DEFAULT_DATA)
+            self.data = resolve_data_path(kw.get("data"))  # fail before any fit work
             self.syst = kw.get("syst", DEFAULT_SYST)
             _syst_components(self.syst)
             self.offset = kw.get("offset", "min")
@@ -572,7 +629,7 @@ def _make_regularizer_class():
             super().__init__(mapping, dtype)
             self.dtype = dtype
             self.mapping = mapping
-            self.data = getattr(mapping, "data", DEFAULT_DATA)
+            self.data = getattr(mapping, "data", None)
             self.syst = getattr(mapping, "syst", DEFAULT_SYST)
             self.offset_arg = getattr(mapping, "offset", "min")
             self.tau_arg = getattr(mapping, "tau", None)

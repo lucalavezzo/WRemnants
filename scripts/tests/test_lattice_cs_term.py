@@ -33,13 +33,19 @@ given to exercise the bitwise snapshot check against real rules.
      (analytic vs exact RGE, identification vs decoupling);
  10. the mis-scale guard: with no fitter on the stack and no tau= the term refuses to arm (the penalty would go in
      unscaled and rabbit's exp(2 tau) would make it e^(2 tau) too strong); tau=0 gives the bare 1/2 (chi2 - offset).
+ 11. the data location: the ASWZ data are private and not in the repository; the default is
+     <dirname(getDataPath())>/lattice/ASWZ2024/lattice_aswz_data.npz (MIT: /scratch/submit/cms/wmass/lattice/ASWZ2024/)
+     and the term reads it from there; with WREMNANTS_DATA_PATH pointing at an empty directory, or a missing data=, the
+     term refuses with a FileNotFoundError naming the path, WREMNANTS_DATA_PATH and data=.
 Exits 1 on any failure."""
 
 import argparse
 import io
 import os
+import socket
 import subprocess
 import sys
+import tempfile
 import types
 
 import numpy as np
@@ -555,6 +561,53 @@ def main():
         "10. tau=0 -> penalty == 1/2 (chi2 - offset), unscaled",
         v0 == 0.5 * (float(T0.chi2_tf(tf.constant(th))) - T0.offset),
     )
+
+    # ---- 11. data location: the default (sibling of the NanoAOD dir) and the missing-file error
+    dflt = LT.default_data_path()
+    check(
+        "11. default data path = <dirname(getDataPath())>/lattice/ASWZ2024/lattice_aswz_data.npz, read by the term",
+        c.data_path == dflt
+        and dflt.endswith(os.path.join("lattice", "ASWZ2024", "lattice_aswz_data.npz"))
+        and os.path.isfile(dflt)
+        and (
+            "WREMNANTS_DATA_PATH" in os.environ
+            or dflt
+            == "/scratch/submit/cms/wmass/lattice/ASWZ2024/lattice_aswz_data.npz"
+            or not socket.getfqdn().endswith(".mit.edu")
+        ),
+        dflt,
+    )
+    saved = os.environ.get("WREMNANTS_DATA_PATH")
+    with tempfile.TemporaryDirectory() as tmp:
+        nano = os.path.join(tmp, "NanoAOD")
+        os.mkdir(nano)
+        os.environ["WREMNANTS_DATA_PATH"] = nano
+        try:
+            want = os.path.join(tmp, "lattice", "ASWZ2024", "lattice_aswz_data.npz")
+            check(
+                "11. WREMNANTS_DATA_PATH moves the default",
+                LT.default_data_path() == want,
+            )
+            for label, kw in (
+                ("default", {}),
+                ("data=", {"data": os.path.join(tmp, "x.npz")}),
+            ):
+                try:
+                    term(tau=0.0, rules=rules, **kw)
+                    check(f"11. missing data file ({label}) refused", False)
+                except FileNotFoundError as e:
+                    msg = str(e)
+                    check(
+                        f"11. missing data file ({label}) refused, message names path, WREMNANTS_DATA_PATH, data=",
+                        (want if not kw else kw["data"]) in msg
+                        and "WREMNANTS_DATA_PATH" in msg
+                        and "data=" in msg,
+                    )
+        finally:
+            if saved is None:
+                os.environ.pop("WREMNANTS_DATA_PATH", None)
+            else:
+                os.environ["WREMNANTS_DATA_PATH"] = saved
 
     print("ALL PASS" if not FAIL else f"FAILED: {FAIL}")
     return 1 if FAIL else 0
