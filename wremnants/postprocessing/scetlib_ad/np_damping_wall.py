@@ -1215,6 +1215,63 @@ def _make_regularizer_class():
     return NPDampingWall
 
 
+def _make_constraints_class():
+    import tensorflow as tf
+
+    from rabbit.constraints.constraints import Constraints
+
+    class NPDomainConstraints(Constraints):
+        """The physical-NP region as HARD constraints, for rabbit's trust-constr.
+
+            --minimizerMethod trust-constr --constraints \
+                wremnants.postprocessing.scetlib_ad.np_damping_wall.NPDomainConstraints \
+                [smallb=<0|1>] [ymax=<float>] [margin=<float>]
+
+        The SAME conditions as NPDampingWall (built by the same code: an
+        NPDampingWall is constructed and armed underneath, and its
+        ``constraint_spec`` supplies the rows), so "physical" is defined in one
+        place. Use it INSTEAD of ``-r NPDampingWall`` under trust-constr: the
+        region is then enforced exactly, with no penalty in the loss. The
+        penalty-shape options (smooth, delta, bmax) have no meaning here and are
+        refused.
+        """
+
+        def __init__(self, indata, *args, **kwargs):
+            super().__init__(indata)
+            for a in args:
+                key = a.split("=", 1)[0].strip()
+                if key in ("smooth", "delta", "bmax"):
+                    raise ValueError(
+                        f"NPDomainConstraints: '{key}=' shapes the wall's PENALTY, "
+                        "which hard constraints do not have; only smallb=, ymax= "
+                        "and margin= apply."
+                    )
+            mapping = _lazy_class("NPDampingMapping").parse_args(indata, *args)
+            self._wall = _lazy_class("NPDampingWall")(mapping, indata.dtype)
+
+        def set_layout(self, parms):
+            self._wall.set_expectations(None, None, parms=parms)
+            active = self._wall._active
+            self.labels = [c.label for c in active]
+            self.lower = np.array([float(c.bound) for c in active], dtype=np.float64)
+            self.upper = np.full(len(active), np.inf)
+
+        def values(self, x):
+            if not self._wall._active:
+                # every condition reads held lambdas only (checked and dropped
+                # by the wall): nothing left to constrain
+                return tf.zeros([0], dtype=x.dtype)
+            return self._wall.constraint_spec(x, None)[0]
+
+    return NPDomainConstraints
+
+
+def _lazy_class(name):
+    """A lazily built class of this module, built once and cached."""
+    cls = globals().get(name)
+    return cls if cls is not None else __getattr__(name)
+
+
 # PEP-562 lazy class resolution: rabbit's loader does
 #     module = importlib.import_module(...); cls = getattr(module, class_name)
 # so the classes are synthesised on first attribute access, keeping the module
@@ -1227,5 +1284,9 @@ def __getattr__(name):
     if name == "NPDampingWall":
         cls = _make_regularizer_class()
         globals()["NPDampingWall"] = cls
+        return cls
+    if name == "NPDomainConstraints":
+        cls = _make_constraints_class()
+        globals()["NPDomainConstraints"] = cls
         return cls
     raise AttributeError(name)
