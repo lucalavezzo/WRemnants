@@ -1256,6 +1256,10 @@ def _make_constraints_class():
             self.lower = np.array([float(c.bound) for c in active], dtype=np.float64)
             self.upper = np.full(len(active), np.inf)
 
+        def parameter_indices(self):
+            # the fitted lambdas the conditions read (held ones are constants)
+            return sorted(self._wall._idx.values())
+
         def values(self, x):
             if not self._wall._active:
                 # every condition reads held lambdas only (checked and dropped
