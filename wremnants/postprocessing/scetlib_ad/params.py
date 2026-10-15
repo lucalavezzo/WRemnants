@@ -154,12 +154,24 @@ def scetlib_name(rabbit):
 #                     now has nothing holding the TMD physical; pass
 #                     prior_sigmas=lambda2=1,lambda4=1,delta_lambda2=1 to get
 #                     the old priors back.
+#   lambda2_nu, lambda4_nu
+#                     the CS-kernel NP parameters, free since 2026-10-15 (Luca):
+#                     no NP lambda carries a prior; the only external
+#                     information on the CS kernel is the ASWZ lattice chi2
+#                     (lattice_cs_term.LatticeCSTerm, fitterAD.sh --lattice),
+#                     which used to need prior_sigmas=lambda2_nu=nan,lambda4_nu=nan
+#                     to replace these priors. A fit without the lattice now
+#                     constrains the CS kernel by the data (and the physical-region
+#                     wall/constraints) alone; pass
+#                     prior_sigmas=lambda2_nu=1,lambda4_nu=1 for the old priors.
 FREE_PARAMS = frozenset(
     {
         "alphaS",
         "lambda2",
         "lambda4",
         "delta_lambda2",
+        "lambda2_nu",
+        "lambda4_nu",
         "lambda_inf",
         "lambda_inf_nu",
         "b0_over_bmax_nu",
