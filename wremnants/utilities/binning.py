@@ -207,19 +207,8 @@ absYWgen_binning_corr = [
     4,
     5,
 ]
-# for the Z, based on reco binning, but including additional bins where reco binning is too coarse.
-#
-# The edges above 100 (110, 130, 250) exist so the theory corrections resolve the
-# region the response matrix now resolves. `make_theory_corr` rebins its inputs to
-# their COMMON binning, so a single [100, 1300] cell here collapses the whole
-# region no matter what the other inputs carry.
-#
-# 250 is where the yield stops RECONSTRUCTING, not where MiNNLO stops (which is
-# ~1 TeV): the analysis' own muon window pushes both muons past 60 GeV by
-# qT ~ 130, and reco efficiency is 0.019 at [100,110], 0.0011 at [120,130] and
-# exactly 0 above 250. The top edge stays 1300 so nothing is lost from the
-# normalisation. See studies/scetlib-ad-param-model/260826-response-above100/.
-ptZgen_binning_corr = [*ptZ_binning[:-1], 54, 75, 100, 110, 130, 250, 1300]
+# for the Z, based on reco binning, but including additional bins where reco binning is too coarse
+ptZgen_binning_corr = [*ptZ_binning[:-1], 54, 75, 100, 1300]
 absYZgen_binning_corr = [
     *yll_20quantiles_binning[10:-1],
     2.0,
